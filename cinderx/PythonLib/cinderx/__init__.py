@@ -111,7 +111,15 @@ try:
     try:
         from _cinderx import is_adaptive_static_python_enabled
     except ImportError:
+
         def is_adaptive_static_python_enabled() -> bool:
+            return False
+
+    try:
+        from _cinderx import is_lightweight_frames_enabled
+    except ImportError:
+
+        def is_lightweight_frames_enabled() -> bool:
             return False
 
 except ImportError as e:
@@ -142,6 +150,9 @@ except ImportError as e:
         return False
 
     def is_adaptive_static_python_enabled() -> bool:
+        return False
+
+    def is_lightweight_frames_enabled() -> bool:
         return False
 
     from asyncio import AbstractEventLoop, Future

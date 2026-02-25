@@ -405,6 +405,20 @@ PyObject* cinder_is_adaptive_static_python_enabled(PyObject*, PyObject*) {
 #endif
 }
 
+PyDoc_STRVAR(
+    cinder_is_lightweight_frames_enabled_doc,
+    "is_lightweight_frames_enabled($module, /)\n"
+    "--\n"
+    "\n"
+    "Returns whether ENABLE_LIGHTWEIGHT_FRAMES was enabled at build time.");
+PyObject* cinder_is_lightweight_frames_enabled(PyObject*, PyObject*) {
+#ifdef ENABLE_LIGHTWEIGHT_FRAMES
+  Py_RETURN_TRUE;
+#else
+  Py_RETURN_FALSE;
+#endif
+}
+
 // In 3.12+ we don't have a shadow-stack so there's no need for our own
 // stack-walking functions.
 #if PY_VERSION_HEX < 0x030C0000
@@ -1224,6 +1238,10 @@ PyMethodDef _cinderx_methods[] = {
      cinder_is_adaptive_static_python_enabled,
      METH_NOARGS,
      cinder_is_adaptive_static_python_enabled_doc},
+    {"is_lightweight_frames_enabled",
+     cinder_is_lightweight_frames_enabled,
+     METH_NOARGS,
+     cinder_is_lightweight_frames_enabled_doc},
 #if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_PARALLEL_GC)
     {"get_threshold",
      cinder_get_threshold,

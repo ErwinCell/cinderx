@@ -149,6 +149,24 @@ def should_enable_adaptive_static_python(
     return py_version == "3.14" and machine in {"aarch64", "arm64"}
 
 
+def should_enable_lightweight_frames(
+    py_version: str,
+    meta_python: bool,
+    machine: str | None = None,
+) -> bool:
+    if meta_python and py_version == "3.12":
+        return True
+
+    if machine is None:
+        machine = platform.machine()
+    machine = machine.lower()
+
+    # Stage A rollout:
+    # - keep existing meta 3.12 behavior
+    # - enable by default for OSS 3.14 ARM only
+    return py_version == "3.14" and machine in {"aarch64", "arm64"}
+
+
 def is_env_flag_enabled(var: str, default: bool = False) -> bool:
     raw_value = os.environ.get(var)
     if raw_value is None:
@@ -162,6 +180,24 @@ def is_env_flag_enabled(var: str, default: bool = False) -> bool:
 
     # Preserve historical behavior: any unknown non-empty value means enabled.
     return True
+
+
+def run_pgo_workload(workload_cmd: list[str], workload_args: dict[str, object]) -> None:
+    # CPython's --pgo test workload can fail intermittently; retry once to
+    # avoid aborting an otherwise healthy instrumented build on a flaky run.
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(workload_cmd, **workload_args)
+            return
+        except subprocess.CalledProcessError as exc:
+            if attempt == max_attempts:
+                raise
+            print(
+                "PGO workload failed "
+                f"(attempt {attempt}/{max_attempts}, exit={exc.returncode}); "
+                "retrying..."
+            )
 
 
 class BuildCommand(build):
@@ -247,7 +283,7 @@ if __name__ == "__main__":
         }
         if is_clang:
             workload_args["cwd"] = clang_pgo_dir
-        subprocess.run(workload_cmd, **workload_args)
+        run_pgo_workload(workload_cmd, workload_args)
 
         if is_clang:
             print_section("PGO STAGE 2b: Merging profile data")
@@ -470,7 +506,10 @@ class BuildExt(build_ext):
         set_option("ENABLE_GENERATOR_AWAITER", meta_312)
         set_option("ENABLE_INTERPRETER_LOOP", meta_312 or is_314plus)
         set_option("ENABLE_LAZY_IMPORTS", meta_312)
-        set_option("ENABLE_LIGHTWEIGHT_FRAMES", meta_312)
+        set_option(
+            "ENABLE_LIGHTWEIGHT_FRAMES",
+            should_enable_lightweight_frames(py_version, meta_python),
+        )
         set_option("ENABLE_PARALLEL_GC", meta_312)
         set_option("ENABLE_PEP523_HOOK", meta_312 or is_314plus)
         set_option("ENABLE_PERF_TRAMPOLINE", meta_312)

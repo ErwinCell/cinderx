@@ -41,6 +41,27 @@ class CinderXOSSTest(unittest.TestCase):
             ),
         )
 
+    def test_lightweight_frames_enablement_state(self) -> None:
+        import cinderx
+
+        self.assertTrue(hasattr(cinderx, "is_lightweight_frames_enabled"))
+        enabled = cinderx.is_lightweight_frames_enabled()
+        self.assertIsInstance(enabled, bool)
+
+        machine = platform.machine().lower()
+        is_meta_312 = "+meta" in sys.version and sys.version_info[:2] == (3, 12)
+        is_314_arm = sys.version_info[:2] == (3, 14) and machine in {"aarch64", "arm64"}
+        expected = is_meta_312 or is_314_arm
+        self.assertEqual(
+            enabled,
+            expected,
+            msg=(
+                "Lightweight frames enablement mismatch for this runtime: "
+                f"version={sys.version_info.major}.{sys.version_info.minor}, machine={machine}, "
+                f"expected={expected}, actual={enabled}"
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
