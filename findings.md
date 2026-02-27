@@ -1868,3 +1868,56 @@ Interpretation:
 - JIT activation evidence in auto-jit log:
   - contains multiple `Finished compiling __main__:*` entries (e.g. `Task.runTask`, `DeviceTask.fn`).
 
+## 2026-02-27 ARM Direct Compare Refresh: CPython Native JIT vs CinderX
+
+### Remote entrypoint and workload
+- Remote-only execution:
+  - `ssh root@124.70.162.35`
+- Workload harness:
+  - `scripts/arm/bench_compare_modes.py`
+  - same parameters for all modes (`n=250`, `warmup=20000`, `calls=12000`, `repeats=5`).
+
+### Important environment correction
+- Existing system Python (`/opt/python-3.14/bin/python3.14`) reports:
+  - `RuntimeError: Executors are not available in this build`
+  - so `PYTHON_JIT=1` there is not a true native-JIT comparison.
+- Built a JIT-enabled CPython 3.14.3 on the same host:
+  - source: `/root/work/Python-3.14.3`
+  - install prefix: `/root/opt/python-3.14-jit`
+  - configure: `--enable-experimental-jit=yes`
+  - make fix required on this host:
+    - `PYTHON_FOR_REGEN=/opt/python-3.14/bin/python3.14`
+    - (system `python3` is 3.9 and cannot run `Tools/jit/build.py` due `match` syntax)
+- JIT enablement proof on built CPython:
+  - `_opcode.get_executor(...).is_valid() == True`
+  - `len(executor.get_jit_code()) == 8192`
+
+### Direct comparison run (true CPython JIT binary)
+- CPython binary used:
+  - `/root/opt/python-3.14-jit/bin/python3.14`
+- Collected mode medians:
+  - `cpython interp (PYTHON_JIT=0)`: `0.2033475680 s`
+  - `cpython jit (PYTHON_JIT=1)`: `0.2692244400 s`
+  - `cinderx interp`: `0.2864123950 s`
+  - `cinderx jit`: `0.2702031260 s`
+- Relative ratios:
+  - `cpython_jit_vs_interp`: `0.7553x` (native JIT slower on this workload)
+  - `cinderx_jit_vs_interp`: `1.0600x` (CinderX JIT faster than its interp baseline)
+  - `cpython_interp_vs_cinderx_interp`: `1.4085x` (CPython interp faster in this run)
+  - `cpython_jit_vs_cinderx_jit`: `1.0036x` (two JIT modes roughly equal; CPython JIT slightly faster)
+- CinderX JIT codegen evidence from same run:
+  - `compiled_size=1264`
+  - `stack_size=240`
+  - `spill_stack_size=160`
+  - `dump_elf.elf_e_machine=183` (`EM_AARCH64`)
+
+### Artifacts
+- Local:
+  - `artifacts/richards/direct_compare_nativejit_20260227_232009/cpython_interp.json`
+  - `artifacts/richards/direct_compare_nativejit_20260227_232009/cpython_jit.json`
+  - `artifacts/richards/direct_compare_nativejit_20260227_232009/cinderx_interp.json`
+  - `artifacts/richards/direct_compare_nativejit_20260227_232009/cinderx_jit.json`
+  - `artifacts/richards/direct_compare_nativejit_20260227_232009/summary.json`
+- Remote:
+  - `/root/work/arm-sync/cmp_nativejit_20260227_232009/*`
+
