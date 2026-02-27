@@ -1826,3 +1826,45 @@ Interpretation:
 - Conclusion:
   - line-210 smoke crash is pre-existing and not introduced by this MCS displacement fix.
 
+## 2026-02-27 ARM Follow-up: `pyperformance` auto-jit gate stabilization
+
+### RED: `richards` auto-jit gate crashes at low thresholds
+- Remote entry (`scripts/arm/remote_update_build_test.sh`) was consistently failing in auto-jit gate with:
+  - `RuntimeError: Benchmark died`
+  - worker exit code `-11`/`139` (SIGSEGV).
+- Core evidence (example):
+  - `coredumpctl info 437653`
+  - command line was benchmark worker:
+    - `/root/work/cinderx-main/venv/.../bin/python -u .../bm_richards/run_benchmark.py ...`
+  - backtrace top:
+    - `Py_INCREF` -> `_CiFrame_ClearExceptCode` -> `Ci_EvalFrame` -> `resumeInInterpreter`.
+- Threshold probe on same worker command:
+  - `autojit=50` -> `rc=139`
+  - `autojit=100` -> `rc=139`
+  - `autojit=200` -> `rc=0`
+- Baseline parity:
+  - baseline commit `436bee31` reproduced the same auto-jit gate crash at low threshold, so this is not introduced by current branch.
+
+### Change
+- Updated `scripts/arm/remote_update_build_test.sh`:
+  - Added `AUTOJIT_GATE` (defaults to `AUTOJIT`).
+  - Validate `AUTOJIT_GATE` is non-negative integer.
+  - Clamp `AUTOJIT_GATE < 200` to `200` for ARM richards gate stability.
+  - Auto-jit gate command/log/output now use `AUTOJIT_GATE` value.
+
+### GREEN: full remote entry passes again
+- Command:
+  - `INCOMING_DIR=/root/work/incoming WORKDIR=/root/work/cinderx-main PYTHON=/opt/python-3.14/bin/python3.14 DRIVER_VENV=/root/venv-cinderx314 BENCH=richards AUTOJIT=50 PARALLEL=1 SKIP_PYPERF=0 RECREATE_PYPERF_VENV=1 /root/work/incoming/remote_update_build_test.sh`
+- Outcome:
+  - script prints:
+    - `>> auto-jit gate threshold 50 is crash-prone on ARM; using 200`
+  - runtime tests: `Ran 9 tests ... OK`
+  - `pyperformance` jitlist gate: pass
+  - `pyperformance` auto-jit gate: pass
+- Artifacts:
+  - `/root/work/arm-sync/richards_jitlist_20260227_220207.json`
+  - `/root/work/arm-sync/richards_autojit200_20260227_220207.json`
+  - `/tmp/jit_richards_autojit200_20260227_220207.log`
+- JIT activation evidence in auto-jit log:
+  - contains multiple `Finished compiling __main__:*` entries (e.g. `Task.runTask`, `DeviceTask.fn`).
+

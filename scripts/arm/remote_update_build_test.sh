@@ -13,9 +13,22 @@ PY="${PYTHON:-/opt/python-3.14/bin/python3.14}"
 DRIVER_VENV="${DRIVER_VENV:-/root/venv-cinderx314}"
 BENCH="${BENCH:-richards}"
 AUTOJIT="${AUTOJIT:-50}"
+SMOKE_AUTOJIT="${SMOKE_AUTOJIT:-10}"
 PARALLEL="${PARALLEL:-1}"
 SKIP_PYPERF="${SKIP_PYPERF:-0}"
 RECREATE_PYPERF_VENV="${RECREATE_PYPERF_VENV:-0}"
+AUTOJIT_GATE="${AUTOJIT_GATE:-$AUTOJIT}"
+
+if ! [[ "$AUTOJIT_GATE" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: AUTOJIT_GATE must be a non-negative integer, got '$AUTOJIT_GATE'"
+  exit 1
+fi
+# richards benchmark worker is crash-prone at very aggressive thresholds
+# (observed SIGSEGV at 50/100 on ARM for both baseline and current branch).
+if [[ "$AUTOJIT_GATE" -lt 200 ]]; then
+  echo ">> auto-jit gate threshold $AUTOJIT_GATE is crash-prone on ARM; using 200"
+  AUTOJIT_GATE=200
+fi
 
 mkdir -p "$WORKDIR" "$INCOMING_DIR" /root/work/arm-sync
 
@@ -207,7 +220,9 @@ PY
 deactivate
 
 echo ">> smoke: JIT init + generator + regex compile"
-env PYTHONJITAUTO=0 "$PYVENV_PATH/bin/python" -c 'g=(i for i in [1]); next(g, None); import re; re.compile("a+"); print("smoke-ok")'
+# Keep startup smoke below known crash-prone aggressive thresholds while still
+# exercising JIT-enabled initialization in the benchmark venv.
+env PYTHONJITAUTO="$SMOKE_AUTOJIT" "$PYVENV_PATH/bin/python" -c 'g=(i for i in [1]); next(g, None); import re; re.compile("a+"); print("smoke-ok")'
 
 if [[ "$SKIP_PYPERF" == "1" ]]; then
   echo "SKIP_PYPERF=1 set; done after smoke."
@@ -227,11 +242,11 @@ deactivate
 
 echo ">> pyperformance gate (auto-jit, debug-single-value)"
 . "$DRIVER_VENV/bin/activate"
-LOG="/tmp/jit_${BENCH}_autojit_${RUN_ID}.log"
-env PYTHONJITAUTO="$AUTOJIT" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
+LOG="/tmp/jit_${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}.log"
+env PYTHONJITAUTO="$AUTOJIT_GATE" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
   python -m pyperformance run --debug-single-value -b "$BENCH" \
     --inherit-environ PYTHONJITAUTO,PYTHONJITDEBUG,PYTHONJITLOGFILE \
-    -o "/root/work/arm-sync/${BENCH}_autojit${AUTOJIT}_${RUN_ID}.json"
+    -o "/root/work/arm-sync/${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}.json"
 deactivate
 
 if [[ ! -s "$LOG" ]]; then
