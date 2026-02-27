@@ -560,6 +560,26 @@ void FrameAsm::linkLightWeightFunctionFrame(
   env_.addAnnotation(
       "Set _PyInterpreterFrame::f_funcobj", store_f_funcobj_cursor);
 
+#if PY_VERSION_HEX >= 0x030E0000
+  // Keep key frame metadata valid even before lazy frame population. This
+  // avoids crashes in C APIs that inspect the current frame (e.g.
+  // PyEval_GetGlobals / frame cleanup paths) while running JIT code.
+  asmjit::BaseNode* store_frame_meta_cursor = as_->cursor();
+  as_->mov(
+      scratch,
+      x86::ptr(func_reg, offsetof(PyFunctionObject, func_globals)));
+  as_->mov(x86::ptr(x86::rbp, FRAME_OFFSET(f_globals)), scratch);
+  as_->mov(
+      scratch,
+      x86::ptr(func_reg, offsetof(PyFunctionObject, func_builtins)));
+  as_->mov(x86::ptr(x86::rbp, FRAME_OFFSET(f_builtins)), scratch);
+  as_->mov(x86::qword_ptr(x86::rbp, FRAME_OFFSET(frame_obj)), 0);
+  as_->mov(x86::word_ptr(x86::rbp, FRAME_OFFSET(return_offset)), 0);
+  as_->mov(x86::byte_ptr(x86::rbp, FRAME_OFFSET(visited)), 0);
+  env_.addAnnotation(
+      "Initialize lightweight frame metadata", store_frame_meta_cursor);
+#endif
+
   // Store prev_instr + tlbc_index
   asmjit::BaseNode* store_prev_instr_cursor = as_->cursor();
 #if PY_VERSION_HEX >= 0x030E0000
@@ -733,6 +753,49 @@ void FrameAsm::linkLightWeightFunctionFrame(
 #endif
   env_.addAnnotation(
       "Set _PyInterpreterFrame::f_funcobj", store_f_funcobj_cursor);
+
+#if PY_VERSION_HEX >= 0x030E0000
+  // Keep key frame metadata valid even before lazy frame population. This
+  // avoids crashes in C APIs that inspect the current frame (e.g.
+  // PyEval_GetGlobals / frame cleanup paths) while running JIT code.
+  asmjit::BaseNode* store_frame_meta_cursor = as_->cursor();
+  as_->ldr(
+      scratch,
+      arch::ptr_offset(func_reg, offsetof(PyFunctionObject, func_globals)));
+  as_->str(
+      scratch,
+      arch::ptr_resolve(
+          as_, arch::fp, FRAME_OFFSET(f_globals), arch::reg_scratch_1));
+  as_->ldr(
+      scratch,
+      arch::ptr_offset(func_reg, offsetof(PyFunctionObject, func_builtins)));
+  as_->str(
+      scratch,
+      arch::ptr_resolve(
+          as_, arch::fp, FRAME_OFFSET(f_builtins), arch::reg_scratch_1));
+  as_->str(
+      a64::xzr,
+      arch::ptr_resolve(
+          as_, arch::fp, FRAME_OFFSET(frame_obj), arch::reg_scratch_1));
+  as_->strh(
+      a64::wzr,
+      arch::ptr_resolve(
+          as_,
+          arch::fp,
+          FRAME_OFFSET(return_offset),
+          arch::reg_scratch_1,
+          arch::AccessSize::k16));
+  as_->strb(
+      a64::wzr,
+      arch::ptr_resolve(
+          as_,
+          arch::fp,
+          FRAME_OFFSET(visited),
+          arch::reg_scratch_1,
+          arch::AccessSize::k8));
+  env_.addAnnotation(
+      "Initialize lightweight frame metadata", store_frame_meta_cursor);
+#endif
 
   // Store prev_instr + tlbc_index
   asmjit::BaseNode* store_prev_instr_cursor = as_->cursor();

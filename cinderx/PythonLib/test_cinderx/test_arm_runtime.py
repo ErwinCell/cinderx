@@ -189,6 +189,44 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue(proc.stdout.strip().isdigit(), proc.stdout)
 
+    def test_autojit0_lightweight_frame_typing_import_smoke(self) -> None:
+        # Regression guard:
+        # with lightweight frames enabled, this sequence should not segfault
+        # while importing typing from JIT-compiled execution.
+        code = textwrap.dedent(
+            """
+            g = (i for i in [1])
+            import re
+            re.compile("a+")
+            print("ok")
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/typing_import_smoke.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env.update(
+                {
+                    "PYTHONJITAUTO": "0",
+                    "PYTHONJITLIGHTWEIGHTFRAME": "1",
+                }
+            )
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            self.assertIn("ok", proc.stdout)
+
     def test_aarch64_call_sites_are_compact(self) -> None:
         # Performance regression guard:
         # on aarch64, repeated helper-call sites can bloat native code size.
