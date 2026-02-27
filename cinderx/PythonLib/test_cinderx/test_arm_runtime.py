@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import platform
+import tempfile
 import unittest
 
 import cinderx
@@ -55,6 +56,42 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(f(10), 45)
         interp1 = cinderx.jit.count_interpreted_calls(f)
         self.assertEqual(interp1, interp0)
+
+    def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
+        import cinderjit
+
+        if not hasattr(cinderjit, "dump_elf"):
+            self.skipTest("cinderjit.dump_elf is unavailable")
+
+        cinderx.jit.enable()
+        cinderx.jit.compile_after_n_calls(1000000)
+
+        def f(x: int) -> int:
+            return x + 1
+
+        self.assertTrue(cinderx.jit.force_compile(f))
+        self.assertTrue(cinderx.jit.is_jit_compiled(f))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            elf_path = f"{tmp}/jit_dump.elf"
+            cinderjit.dump_elf(elf_path)
+            with open(elf_path, "rb") as fp:
+                header = fp.read(64)
+
+        self.assertGreaterEqual(len(header), 20)
+        self.assertEqual(header[0:4], b"\x7fELF")
+
+        ei_data = header[5]
+        if ei_data == 1:
+            byteorder = "little"
+        elif ei_data == 2:
+            byteorder = "big"
+        else:
+            self.fail(f"Unknown ELF data encoding: {ei_data}")
+
+        # ELF e_machine is at bytes [18:20] in the file header.
+        e_machine = int.from_bytes(header[18:20], byteorder)
+        self.assertEqual(e_machine, 0xB7, f"Expected EM_AARCH64, got 0x{e_machine:04x}")
 
     def test_aarch64_call_sites_are_compact(self) -> None:
         # Performance regression guard:

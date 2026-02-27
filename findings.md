@@ -1288,3 +1288,288 @@ Interpretation:
   - 3.15 default-off (manual env override still available)
   - x86 extension deferred to later phase
 
+## 2026-02-27 Task: CPython Native vs CinderX (Interpreter + JIT) on ARM 3.14
+
+### Requested workflow status
+- Requested process: `brainstorming -> writing-plans -> test-driven-development -> verification-before-completion`.
+- Requested skills: `using-superpowers` + `planning-with-files`.
+- Session constraints observed:
+  - active skill registry in this session does not include those two skills,
+  - `skill-installer` helper could not be executed because local `python` is unavailable.
+
+### Brainstorming results
+- Existing benchmark evidence is already sufficient to explain the main behavior pattern:
+  - cold/short-run results often make JIT look slower,
+  - warm/steady-state results can show JIT speedups.
+- Current richards runner contract does not include an explicit "pure CPython native (no CinderX import)" mode:
+  - `scripts/bench/run_richards_remote.sh` supports `nojit`, `jitlist`, `autojit50`.
+  - `scripts/arm/remote_update_build_test.sh` injects `sitecustomize.py` that auto-loads CinderX unless `CINDERX_DISABLE=1`.
+  - Therefore current `nojit` should be interpreted as "CinderX loaded, JIT disabled", not pure CPython baseline.
+
+### Writing-plans output
+- Plan file created: `docs/plans/2026-02-27-cpython-vs-cinderx-314-arm-analysis.md`.
+
+### TDD status for this task
+- RED/GREEN target defined:
+  - add explicit `cpython` mode to richards sampling contract,
+  - then compare `cpython` vs `cinderx_nojit` vs `jitlist` vs `autojit50`.
+- Execution status:
+  - blocked before RED/GREEN run because remote verification entrypoint is currently unreachable in this session.
+
+### Verification attempts via `<remote test entry>`
+- Attempted remote entry command:
+  - `powershell -ExecutionPolicy Bypass -File scripts/push_to_arm.ps1 -RepoPath c:\work\code\cinderx -WorkBranch bench-cur-7c361dce -ArmHost 124.70.162.35 -SkipPyperformance`
+- Result:
+  - failed in `sync_upstream.ps1` at `git fetch origin` (`Failed to connect to github.com:443` / connection reset).
+- Direct host connectivity checks:
+  - `ssh root@124.70.162.35 "echo remote-ok"` -> `Permission denied (publickey,...)`
+  - `ssh root@106.14.164.133 "echo remote-ok"` -> `Permission denied (publickey,...)`
+
+### Performance evidence used for analysis (existing validated artifacts)
+- Source: `artifacts/richards/arm_samples_20260221_091757.json`
+  - `nojit` mean: `0.0534650194 s`
+  - `jitlist` mean: `0.0547409418 s` (`+2.386%` vs nojit, slower)
+  - `autojit50` mean: `0.0520960826 s` (`-2.560%` vs nojit, faster)
+- Source: prior cold/short-run section (`pyperformance --fast`) in this file:
+  - nojit `103 ms`, jitlist `181 ms`, autojit50 `191 ms` (JIT appears much slower).
+- Source: prior warm-loop tail section in this file:
+  - nojit tail-30 `0.2130860543 s`
+  - jitlist tail-30 `0.1841729017 s` (`-13.57%`)
+  - autojit50 tail-30 `0.0810525232 s` (`-61.96%`)
+
+### Why ARM 3.14 can look "full" / slower
+- Benchmark regime mismatch:
+  - in short/cold runs, JIT compile and initialization overhead dominates;
+  - in warm runs, compiled-path wins can appear after overhead amortization.
+- Low-latency floor + host noise:
+  - many ARM samples are near `~0.05s`; sub-1% gains are easily hidden by jitter/outliers.
+- Baseline definition gap:
+  - current "nojit" is not pure CPython native, so "CPython vs CinderX" can be misread.
+- Threshold/workload interaction:
+  - `autojit` behavior depends on call counts and worker lifecycle; short tasks may pay compile cost without enough hot-loop reuse.
+
+### Next required step for definitive answer
+- Add and validate explicit `cpython` sampling mode (`CINDERX_DISABLE=1`) through the same remote entry flow, then re-run comparison matrix after remote auth/network is restored.
+
+## 2026-02-27 Remote Run: CPython Native (interp/JIT) vs CinderX (interp/JIT)
+
+### Remote target
+- Host: `root@124.70.162.35`
+- Arch: `aarch64`
+
+### Environment facts observed
+- Existing CPython at `/opt/python-3.14/bin/python3.14` had:
+  - `sys._jit.is_available() == False`
+  - i.e. cannot directly run native CPython JIT there.
+- Built a JIT-enabled CPython 3.14.3 under tmpfs:
+  - install path: `/tmp/cpython314jit/install/bin/python3.14`
+  - build source: `/tmp/cpython314jit/src` from `Python-3.14.3.tgz`
+  - config: `--enable-experimental-jit=yes-off`
+  - verification:
+    - default: `sys._jit -> (True, False)`
+    - `PYTHON_JIT=1`: `sys._jit -> (True, True)`
+- CinderX runtime path:
+  - `/root/venv-cinderx314/bin/python`
+  - JIT API sanity check:
+    - `cinderx.jit.force_compile(f) == True`
+    - compiled size observed (`f`): `960` bytes.
+
+### Practical blocker and workaround
+- Root filesystem is full (`/` at 100%), so `pyperformance run` default venv root under `/root/venv` fails.
+- Workaround used:
+  - build CPython JIT in `/tmp` (tmpfs),
+  - run benchmark directly via `bm_richards/run_benchmark.py` + `--debug-single-value`,
+  - avoid pyperformance's internal auto-venv creation in `/root`.
+
+### Benchmark method
+- Benchmark script:
+  - `/root/venv-cinderx314/lib/python3.14/site-packages/pyperformance/data-files/benchmarks/bm_richards/run_benchmark.py`
+- Samples per mode: `5`
+- Modes:
+  - `cpython_interp`: `/tmp/venv-cpython314jit/bin/python`, `PYTHON_JIT=0`
+  - `cpython_jit`: `/tmp/venv-cpython314jit/bin/python`, `PYTHON_JIT=1`
+  - `cinderx_interp`: `/root/venv-cinderx314/bin/python`, `PYTHONJITDISABLE=1`
+  - `cinderx_jit`: `/root/venv-cinderx314/bin/python`, `PYTHONJITAUTO=50`
+
+### Key results (richards, lower is better)
+- Artifact:
+  - `artifacts/richards/direct_richards_cpython_cinderx_autojit_20260227_130845.json`
+
+- Means:
+  - `cpython_interp`: `0.0516462776 s`
+  - `cpython_jit`: `0.0486890842 s`
+    - vs CPython interp: `-5.726%` (faster)
+  - `cinderx_interp`: `0.0520793502 s`
+    - vs CPython interp: `+0.839%` (slower)
+  - `cinderx_jit` (`autojit50`): `0.0516185456 s`
+    - vs CinderX interp: `-0.885%` (faster)
+    - vs CPython JIT: `+6.017%` (slower)
+
+### Notes on interpretation
+- This run is a same-host, same-benchmark comparison and uses the actual requested four categories.
+- Because host variance still exists, treat this as directional for this machine/setup.
+- In this sample set:
+  - CPython native JIT gain is clear over CPython interp.
+  - CinderX JIT gain over CinderX interp is present but small.
+
+## 2026-02-27 Assembly Diff: CinderX JIT vs CPython Native JIT (AArch64)
+
+### Setup
+- Host: `root@124.70.162.35`
+- Function shape on both sides:
+  - `def f(n): s=0; for i in range(n): s += i; return s`
+- CinderX:
+  - force-compiled `f`
+  - dumped JIT ELF, extracted `.text`, disassembled as AArch64
+- CPython native JIT:
+  - `PYTHON_JIT=1`
+  - executor found at `JUMP_BACKWARD` offset `50`
+  - disassembled `get_jit_code()` blob (head `952` bytes for same-size window)
+
+### Key evidence artifacts
+- `artifacts/asm/cinderx_f_disasm_aarch64.txt`
+- `artifacts/asm/cpython_executor_disasm_head952_aarch64.txt`
+- `artifacts/asm/cpython_executor_disasm_head2880_aarch64.txt`
+- `artifacts/asm/cinderx_f_text.bin`
+- `artifacts/asm/cpython_executor_head952.bin`
+- `artifacts/asm/cpython_executor_full4096.bin`
+- `artifacts/asm/byte_compare_cinderx_vs_cpython_head952.txt`
+- `artifacts/asm/inst_mix_cinderx_vs_cpython_head952.txt`
+- design note: `docs/plans/2026-02-27-cinderx-vs-cpython-jit-asm-aligned.md`
+
+### Quantitative summary
+- Byte-level equal-size compare (`952` vs `952`):
+  - `same_bytes=62`
+  - `same_ratio=6.5126%`
+  - `lcp=0`
+- Instruction mix (`238` instructions each in compared window):
+  - CinderX: `bl=7`, `blr=14`, `ret=3`, `b.cond=16`, `cbz/cbnz=5`, `tbz/tbnz=2`, `ldr-literal=14`
+  - CPython: `bl=6`, `blr=2`, `ret=0`, `b.cond=8`, `cbz/cbnz=6`, `tbz/tbnz=6`, `ldr-literal=4`
+
+### Main difference pattern
+- CinderX sample shows heavier literal-pool indirect helper calls (`ldr x16, literal` + `blr x16`) and a compact deopt dispatch ladder.
+- CPython native JIT sample shows executor/superblock style with more direct internal `bl` edges and fewer indirect callback sites in the equal-size window.
+
+## 2026-02-27 ARM Probe: `cinderjit` APIs vs CPython Native
+
+### Verification entrypoint and artifacts
+- Remote entrypoint used: `ssh root@124.70.162.35`
+- Probe script: `scripts/arm/probe_jit_apis.py`
+- Local artifacts:
+  - `artifacts/arm/jit_api_probe/cinderx_default.json`
+  - `artifacts/arm/jit_api_probe/cinderx_jit_env.json`
+  - `artifacts/arm/jit_api_probe/cpython_default.json`
+  - `artifacts/arm/jit_api_probe/cpython_python_jit_1.json`
+  - `artifacts/arm/jit_api_probe/cpython_help_xoptions.txt`
+
+### Runs executed
+- CinderX env (default):  
+  `/root/venv-cinderx314/bin/python /root/work/cinderx-main/scripts/arm/probe_jit_apis.py --label cinderx_default`
+- CinderX env (JIT vars):  
+  `PYTHONJIT=1 PYTHONJITAUTO=1 /root/venv-cinderx314/bin/python ... --label cinderx_jit_env`
+- CPython native (default):  
+  `/opt/python-3.14/bin/python3.14 ... --label cpython_default`
+- CPython native (`PYTHON_JIT=1`):  
+  `PYTHON_JIT=1 /opt/python-3.14/bin/python3.14 ... --label cpython_python_jit_1`
+
+### Result summary
+- CinderX runtime (`/root/venv-cinderx314/bin/python`):
+  - `cinderjit` import: success.
+  - API presence: `get_compiled_size`, `disassemble`, `get_compiled_functions`, `dump_elf` all present.
+  - Probe payload compiled: `is_jit_compiled=True`.
+  - `get_compiled_size(payload)=1232` bytes.
+  - `get_compiled_functions_count`: `1` (default) / `7` (`PYTHONJIT=1,PYTHONJITAUTO=1`).
+  - `dump_elf` succeeded, ELF sizes:
+    - default: `12461` bytes
+    - jit_env: `20653` bytes
+  - `disassemble(payload)` call succeeded but produced no textual asm output on stdout/stderr in this build (markers only).
+  - Note: after `import cinderx`, `cinderjit.__spec__` is `None`; `find_spec("cinderjit")` can raise `ValueError`, but module is usable from `sys.modules`.
+
+- CPython native runtime (`/opt/python-3.14/bin/python3.14`):
+  - `cinderjit`/`cinderx` import: unavailable.
+  - `sys._jit` object exists, but:
+    - `is_available=False`
+    - `is_enabled=False`
+    - unchanged when `PYTHON_JIT=1`.
+  - `--help-xoptions` output does not expose `-X jit` option on this build (`artifacts/arm/jit_api_probe/cpython_help_xoptions.txt`).
+
+### Direct contrast (based on requested APIs)
+- `cinderjit.get_compiled_size`: available and returns non-zero size on CinderX; not available on CPython native.
+- `cinderjit.get_compiled_functions`: available on CinderX and includes probe payload; not available on CPython native.
+- `cinderjit.disassemble`: callable on CinderX but silent in this environment; not available on CPython native.
+- `cinderjit.dump_elf`: available on CinderX and produces ELF for objdump workflow; not available on CPython native.
+
+### Extra verification for asm extraction
+- Verified fallback asm path works on ARM:
+  - `cinderjit.dump_elf('/tmp/cinderjit_probe_*.elf')`
+  - `objcopy -O binary --only-section=.text ...`
+  - `objdump -D -b binary -m aarch64 ...`
+- Observed valid AArch64 instructions from dumped `.text` (non-empty disassembly).
+
+## 2026-02-27 Fix: `dump_elf` ELF Machine Field on ARM
+
+### Problem statement
+- On ARM, `cinderjit.dump_elf()` output could be disassembled as x86 when using plain:
+  - `objdump -d <dumped.elf>`
+- Root cause in source:
+  - ELF file header machine type was hardcoded to x86-64:
+    - `cinderx/Jit/elf/header.h` previously had `machine{0x3e}`.
+
+### Code changes
+- `cinderx/Jit/elf/header.h`
+  - Added architecture-aware ELF machine constants:
+    - `kMachineX86_64 = 0x3e`
+    - `kMachineAArch64 = 0xb7`
+  - Added compile-target selection:
+    - `__x86_64__ || _M_X64 -> kFileMachine = kMachineX86_64`
+    - `__aarch64__ || _M_ARM64 -> kFileMachine = kMachineAArch64`
+  - Updated `FileHeader::machine` to `machine{kFileMachine}`.
+
+- Tests added:
+  - `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+    - `ArmRuntimeTests.test_dump_elf_machine_is_aarch64_on_arm`
+    - Reads ELF header bytes and asserts `e_machine == 0xB7` (EM_AARCH64) on ARM.
+  - `cinderx/PythonLib/test_cinderx/test_cinderjit.py`
+    - `CinderJitModuleTests.test_dump_elf_machine_matches_runtime_arch`
+    - Cross-arch mapping check (x86_64 / aarch64), guarded for availability.
+
+### TDD evidence (remote-only)
+- Remote entrypoint used for all verification:
+  - `ssh root@124.70.162.35`
+
+1. RED (before C++ fix)
+- Command:
+  - `cd /root/work/cinderx-main && /root/venv-cinderx314/bin/python -m unittest discover -s cinderx/PythonLib/test_cinderx -p test_arm_runtime.py -k dump_elf_machine`
+- Result:
+  - `FAIL: Expected EM_AARCH64, got 0x003e`
+  - Failure line: `test_arm_runtime.py:94`
+
+2. GREEN (after C++ fix, rebuilt + reinstalled wheel)
+- Build/install:
+  - `cd /root/work/cinderx-main && /opt/python-3.14/bin/python3.14 -m build --wheel`
+  - `pip --force-reinstall dist/cinderx-2026.2.27.0-cp314-cp314-linux_aarch64.whl` (in `/root/venv-cinderx314`)
+- Same test command result:
+  - `OK (skipped=1)` with target test passing.
+
+### Verification-before-completion
+1. Generate new ELF after fix:
+- Script path on remote:
+  - `/tmp/verify_dump_elf_machine.py`
+- Output:
+  - dumped file: `/tmp/dump_elf_machine_fix_verify.elf`
+  - compiled size sample: `960`
+
+2. Verify ELF header + disassembly mode:
+- Command:
+  - `readelf -h /tmp/dump_elf_machine_fix_verify.elf | egrep 'Class|Type|Machine'`
+  - `objdump -d /tmp/dump_elf_machine_fix_verify.elf | head`
+- Observed:
+  - `Machine: AArch64`
+  - `file format elf64-littleaarch64`
+  - AArch64 mnemonics (`stp`, `mov`, `cbz`, `blr`, `ret`) shown directly.
+
+### Conclusion
+- Fixed: `cinderjit.dump_elf()` now emits architecture-correct ELF `e_machine` on ARM.
+- Impact:
+  - `readelf` and plain `objdump -d` now identify/disassemble dumped JIT ELF correctly as AArch64.
+
