@@ -2277,34 +2277,42 @@ void NativeGenerator::generateDeoptExits(const asmjit::CodeHolder& code) {
 
   env_.addAnnotation("Deoptimization exits", deopt_cursor);
 #elif defined(CINDER_AARCH64)
-  // Always place the deopt exit call to the cold section, and revert to the
-  // previous section at the end of this scope.
-  CodeSectionOverride override{as_, &code, &metadata_, CodeSection::kCold};
-
   auto& deopt_exits = env_.deopt_exits;
-
-  auto deopt_cursor = as_->cursor();
   auto deopt_exit = as_->newLabel();
+  asmjit::BaseNode* deopt_cursor = nullptr;
   std::sort(deopt_exits.begin(), deopt_exits.end(), [](auto& a, auto& b) {
     return a.deopt_meta_index < b.deopt_meta_index;
   });
 
-  // Generate stage 1 trampolines (one per guard). These push the index of the
-  // appropriate `DeoptMetadata` and then jump to the stage 2 trampoline.
-  for (const auto& exit : deopt_exits) {
-    // On x86-64, when you emit a call instruction to a label, it pushes the
-    // return address onto the stack. In order to replicate that behavior on
-    // aarch64, we manually add a label and use adr to determine its offset.
-    auto after = as_->newLabel();
+  // Stage 1 trampolines live in cold code. They only marshal metadata and call
+  // into stage 2, so keeping them cold preserves hot-text locality.
+  {
+    CodeSectionOverride cold_override{
+        as_, &code, &metadata_, CodeSection::kCold};
+    deopt_cursor = as_->cursor();
 
-    as_->bind(exit.label);
-    as_->mov(arch::reg_scratch_0, exit.deopt_meta_index);
-    as_->adr(arch::reg_scratch_1, after);
-    as_->stp(
-        arch::reg_scratch_1, arch::reg_scratch_0, a64::ptr_pre(a64::sp, -16));
-    emitCall(env_, deopt_exit, exit.instr);
-    as_->bind(after);
+    // Generate stage 1 trampolines (one per guard). These push the index of
+    // the appropriate `DeoptMetadata` and then jump to the stage 2 trampoline.
+    for (const auto& exit : deopt_exits) {
+      // On x86-64, when you emit a call instruction to a label, it pushes the
+      // return address onto the stack. In order to replicate that behavior on
+      // aarch64, we manually add a label and use adr to determine its offset.
+      auto after = as_->newLabel();
+
+      as_->bind(exit.label);
+      as_->mov(arch::reg_scratch_0, exit.deopt_meta_index);
+      as_->adr(arch::reg_scratch_1, after);
+      as_->stp(
+          arch::reg_scratch_1, arch::reg_scratch_0, a64::ptr_pre(a64::sp, -16));
+      emitCall(env_, deopt_exit, exit.instr);
+      as_->bind(after);
+    }
   }
+
+  // Stage 2 needs to materialize addresses in hot text (e.g. hard_exit_label).
+  // Keep it in hot code to avoid ADR displacement overflows when cold text is
+  // placed far away (multiple code sections with large hot slabs).
+  CodeSectionOverride hot_override{as_, &code, &metadata_, CodeSection::kHot};
   // Generate the stage 2 trampoline (one per function). This saves the address
   // of the final part of the JIT-epilogue that is responsible for restoring
   // callee-saved registers and returning, our scratch register, whose original

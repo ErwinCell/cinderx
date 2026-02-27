@@ -261,6 +261,31 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
   auto deopt_label = as->newLabel();
   auto kind = instr->getInput(0)->getConstant();
 
+  auto emit_b_eq_far = [&](asmjit::Label target) {
+    auto skip = as->newLabel();
+    as->b_ne(skip);
+    as->b(target);
+    as->bind(skip);
+  };
+  auto emit_b_ne_far = [&](asmjit::Label target) {
+    auto skip = as->newLabel();
+    as->b_eq(skip);
+    as->b(target);
+    as->bind(skip);
+  };
+  auto emit_cbz_far = [&](auto reg_arg, asmjit::Label target) {
+    auto skip = as->newLabel();
+    as->cbnz(reg_arg, skip);
+    as->b(target);
+    as->bind(skip);
+  };
+  auto emit_cbnz_far = [&](auto reg_arg, asmjit::Label target) {
+    auto skip = as->newLabel();
+    as->cbz(reg_arg, skip);
+    as->b(target);
+    as->bind(skip);
+  };
+
   arch::Gp reg = arch::reg_scratch_0;
   bool is_double = false;
   uint64_t mask = 0;
@@ -270,7 +295,7 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
       JIT_CHECK(kind == kNotZero, "Only NotZero is supported for double")
       auto vecd_reg = AutoTranslator::getVecD(instr->getInput(2));
       as->fmov(reg, vecd_reg);
-      as->cbz(reg, deopt_label);
+      emit_cbz_far(reg, deopt_label);
       is_double = true;
     } else {
       auto data_type = instr->getInput(2)->dataType();
@@ -308,9 +333,9 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
       case kNotZero:
         if (mask) {
           as->tst(reg, mask);
-          as->b_eq(deopt_label);
+          emit_b_eq_far(deopt_label);
         } else {
-          as->cbz(reg, deopt_label);
+          emit_cbz_far(reg, deopt_label);
         }
         break;
       case kNotNegative: {
@@ -325,9 +350,9 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
       case kZero:
         if (mask) {
           as->tst(reg, mask);
-          as->b_ne(deopt_label);
+          emit_b_ne_far(deopt_label);
         } else {
-          as->cbnz(reg, deopt_label);
+          emit_cbnz_far(reg, deopt_label);
         }
         break;
       case kAlwaysFail:
@@ -335,7 +360,7 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
         break;
       case kIs:
         emit_cmp(reg);
-        as->b_ne(deopt_label);
+        emit_b_ne_far(deopt_label);
         break;
       case kHasType: {
         as->ldr(
@@ -343,7 +368,7 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
             arch::ptr_offset(reg, offsetof(PyObject, ob_type)));
 
         emit_cmp(arch::reg_scratch_0);
-        as->b_ne(deopt_label);
+        emit_b_ne_far(deopt_label);
         break;
       }
     }

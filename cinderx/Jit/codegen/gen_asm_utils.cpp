@@ -3,6 +3,7 @@
 #include "cinderx/Jit/codegen/gen_asm_utils.h"
 
 #include "cinderx/Jit/codegen/arch.h"
+#include "cinderx/Jit/codegen/code_section.h"
 #include "cinderx/Jit/codegen/environ.h"
 
 namespace jit::codegen {
@@ -36,6 +37,22 @@ void emitIndirectCallThroughLiteral(
   env.as->blr(arch::reg_scratch_br);
 }
 
+bool isInColdSection(const Environ& env) {
+  auto* cold = env.as->code()->sectionByName(codeSectionName(CodeSection::kCold));
+  if (cold == nullptr) {
+    return false;
+  }
+
+  for (auto* node = env.as->cursor(); node != nullptr; node = node->prev()) {
+    if (node->type() == asmjit::NodeType::kSection) {
+      auto* section_node = node->as<asmjit::SectionNode>();
+      return section_node->id() == cold->id();
+    }
+  }
+
+  return false;
+}
+
 #endif
 } // namespace
 
@@ -57,8 +74,16 @@ void emitCall(Environ& env, uint64_t func, const jit::lir::Instruction* instr) {
 #if defined(CINDER_X86_64)
   env.as->call(func);
 #elif defined(CINDER_AARCH64)
-  auto& target = getOrCreateCallTarget(env, func);
-  emitIndirectCallThroughLiteral(env, target);
+  if (isInColdSection(env)) {
+    // Cold blocks can be placed >1MiB from hot text under MCS. Avoid
+    // ldr-literal call lowering here because its imm19 displacement cannot
+    // reach hot literals in that layout.
+    env.as->mov(arch::reg_scratch_br, func);
+    env.as->blr(arch::reg_scratch_br);
+  } else {
+    auto& target = getOrCreateCallTarget(env, func);
+    emitIndirectCallThroughLiteral(env, target);
+  }
 #else
   CINDER_UNSUPPORTED
 #endif

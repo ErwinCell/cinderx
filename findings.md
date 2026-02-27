@@ -1777,3 +1777,52 @@ Interpretation:
 - Even when `mcs=1` succeeds (`256KiB~1MiB`), this micro shape remains slower than `mcs=0` by roughly `19%`.
 - This strongly suggests remaining branch-range/layout sensitivity in split-section mode and/or extra i-cache/branch predictor cost from hot/cold separation for this loop.
 
+## 2026-02-27 ARM Follow-up: MCS `2MiB+` InvalidDisplacement Root Cause and Fix
+
+### Root cause (measured)
+- Failure shape:
+  - `PYTHONJITMULTIPLECODESECTIONS=1`
+  - `PYTHONJITHOTCODESECTIONSIZE=2097152`
+  - `PYTHONJITCOLDCODESECTIONSIZE=2097152`
+- AsmJit failure point:
+  - `resolveUnresolvedLinks()` with `InvalidDisplacement`.
+- Link-level diagnosis:
+  - cross-section links from `.coldtext` to `.text` using `imm19` displacement format.
+  - this matches AArch64 `ldr literal` range limits (about +/-1MiB).
+- Practical interpretation:
+  - cold-side helper-call sites were still loading call targets from hot literal pool entries (`ldr literal + blr`), which overflows when hot/cold are separated by ~2MiB.
+
+### Code changes
+- `cinderx/Jit/codegen/gen_asm_utils.cpp`
+  - on AArch64, `emitCall(env, uint64_t func, ...)` now uses:
+    - hot section: existing dedup literal-pool call lowering
+    - cold section: `mov absolute_target + blr` (no hot-literal reachability dependency)
+- `cinderx/Jit/codegen/gen_asm.cpp`
+  - keep deopt stage-1 in cold and stage-2 in hot to avoid `adr` cross-section overflow for stage-2 hot labels.
+- `cinderx/Jit/codegen/autogen.cpp`
+  - keep only targeted guard far-branch handling; reverted broad branch-veneer rewrite that caused code-size regressions.
+- `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+  - added `test_multiple_code_sections_large_distance_force_compile_smoke` (2MiB/2MiB smoke).
+
+### Remote entry verification (`scripts/arm/remote_update_build_test.sh`)
+- Branch under test: current working tree (`bench-cur-7c361dce` with above changes).
+- Result:
+  - ARM runtime tests: `Ran 9 tests ... OK`
+  - includes:
+    - `test_multiple_code_sections_large_distance_force_compile_smoke`: pass
+    - `test_aarch64_call_sites_are_compact`: pass
+    - `test_aarch64_duplicate_call_result_arg_chain_is_compact`: pass
+- Remaining gate outcome:
+  - script still crashes at line 210 smoke command:
+    - `env PYTHONJITAUTO=0 "$PYVENV_PATH/bin/python" -c 'g=(i for i in [1]); ... re.compile("a+") ...'`
+    - segfault stack points through `typing.__init_subclass__` / `JITRT_CallFunctionEx`.
+
+### Baseline parity check for line-210 segfault
+- Same remote entry, same parameters, but source archived from baseline commit:
+  - `436bee31ac6b34ba74c90133ed651b31ad96c57e`
+- Result:
+  - runtime tests passed (`Ran 8 tests ... OK` on baseline test file),
+  - same line-210 smoke segfault reproduced.
+- Conclusion:
+  - line-210 smoke crash is pre-existing and not introduced by this MCS displacement fix.
+
