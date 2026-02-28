@@ -2001,3 +2001,30 @@ Interpretation:
   - ARM 运行时测试：`Ran 10 tests ... OK`
   - 包含新回归测试 `test_autojit0_lightweight_frame_typing_import_smoke`
   - 脚本整体成功（`exit 0`）
+## 2026-02-28 ARM 完整远端门禁复验（SKIP_PYPERF=0）
+
+### 入口与命令
+- 统一远端入口：
+  - `/root/work/incoming/remote_update_build_test.sh`
+- 实际执行命令：
+  - `INCOMING_DIR=/root/work/incoming WORKDIR=/root/work/cinderx-main PYTHON=/opt/python-3.14/bin/python3.14 DRIVER_VENV=/root/venv-cinderx314 BENCH=richards AUTOJIT=50 PARALLEL=1 SKIP_PYPERF=0 RECREATE_PYPERF_VENV=1 /root/work/incoming/remote_update_build_test.sh`
+
+### 结果
+- 脚本退出码：`0`
+- ARM 运行时测试：`Ran 10 tests ... OK`
+- auto-jit 门禁策略：
+  - 日志提示 `AUTOJIT=50` 在 ARM 上自动提升到 `200`：
+    - `>> auto-jit gate threshold 50 is crash-prone on ARM; using 200`
+
+### 性能产物（本次最新）
+- jitlist JSON：
+  - `/root/work/arm-sync/richards_jitlist_20260228_093637.json`
+  - value：`0.07860610100033227`
+- autojit200 JSON：
+  - `/root/work/arm-sync/richards_autojit200_20260228_093637.json`
+  - value：`0.07193847199960146`
+- autojit 日志：
+  - `/tmp/jit_richards_autojit200_20260228_093637.log`
+
+### JIT 生效证据
+- `Finished compiling __main__:` 命中数：`18`
