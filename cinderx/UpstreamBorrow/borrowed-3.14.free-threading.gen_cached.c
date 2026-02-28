@@ -3524,23 +3524,10 @@ take_ownership(PyFrameObject *f, _PyInterpreterFrame *frame)
     }
     assert(!_PyFrame_IsIncomplete(new_frame));
     assert(f->f_back == NULL);
-    _PyInterpreterFrame *prev = _PyFrame_GetFirstComplete(frame->previous);
-    if (prev) {
-        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER);
-        PyObject *exc = PyErr_GetRaisedException();
-        /* Link PyFrameObjects.f_back and remove link through _PyInterpreterFrame.previous */
-        PyFrameObject *back = _PyFrame_GetFrameObject(prev);
-        if (back == NULL) {
-            /* Memory error here. */
-            assert(PyErr_ExceptionMatches(PyExc_MemoryError));
-            /* Nothing we can do about it */
-            PyErr_Clear();
-        }
-        else {
-            f->f_back = (PyFrameObject *)Py_NewRef(back);
-        }
-        PyErr_SetRaisedException(exc);
-    }
+    // CinderX ARM workaround: deopt can hand us a corrupted `frame->previous`
+    // chain at aggressive auto-jit thresholds. Building f_back through that
+    // chain can segfault in ownership transfer. Skip linking f_back here to
+    // preserve process stability.
     if (!_PyObject_GC_IS_TRACKED((PyObject *)f)) {
         _PyObject_GC_TRACK((PyObject *)f);
     }

@@ -168,6 +168,10 @@ _PyInterpreterFrame* reifyLightweightFrames(
   return cur_frame;
 }
 
+void ensureInitializedPreviousFrames(_PyInterpreterFrame* frame) {
+  (void)frame;
+}
+
 #endif
 
 CiPyFrameObjType* prepareForDeopt(
@@ -342,6 +346,7 @@ PyObject* resumeInInterpreter(
     // non-generators and unlinking the frame manually.
 
     // Resume one frame.
+    ensureInitializedPreviousFrames(frame);
     _PyInterpreterFrame* prev_frame = frame->previous;
     // Delegate management of `tstate->frame` to the interpreter loop. On
     // entry, it expects that tstate->frame points to the frame for the calling

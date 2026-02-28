@@ -123,31 +123,39 @@ static void reifyLocalsplus(
 #endif
 
   BorrowedRef<PyCodeObject> code = frameCode(frame);
-  int free_offset = numLocalsplus(code) - numFreevars(code);
-  // Local variables are not initialized in the frame
-  for (std::size_t i = 0; i < free_offset && i < frame_meta.localsplus.size();
-       i++) {
-    const LiveValue* value = meta.getLocalValue(i, frame_meta);
-    if (value == nullptr) {
-      // Value is dead
-      *localsplus = Ci_STACK_NULL;
-    } else {
-      PyObject* obj = mem.readOwned(*value).release();
-      *localsplus = Ci_STACK_STEAL(obj);
-    }
-    localsplus++;
+  const std::size_t nlocalsplus = static_cast<std::size_t>(numLocalsplus(code));
+  const std::size_t free_offset =
+      static_cast<std::size_t>(numLocalsplus(code) - numFreevars(code));
+
+  // Deopt metadata can legitimately omit dead locals. Ensure the full
+  // localsplus region is initialized to NULL before selectively restoring
+  // tracked values; otherwise frame teardown/copy paths may observe stale
+  // stack data and crash while INCREF/DECREFing.
+  for (std::size_t i = 0; i < nlocalsplus; i++) {
+    localsplus[i] = Ci_STACK_NULL;
   }
 
-  // Free variables are initialized
-  for (std::size_t i = free_offset; i < frame_meta.localsplus.size(); i++) {
+  const std::size_t limit = std::min(frame_meta.localsplus.size(), nlocalsplus);
+  // Local variables are not initialized in the frame.
+  for (std::size_t i = 0; i < free_offset && i < limit; i++) {
     const LiveValue* value = meta.getLocalValue(i, frame_meta);
     if (value == nullptr) {
-      Ci_STACK_CLEAR(*localsplus);
+      // Value is dead.
     } else {
       PyObject* obj = mem.readOwned(*value).release();
-      Ci_STACK_XSETREF(*localsplus, obj);
+      localsplus[i] = Ci_STACK_STEAL(obj);
     }
-    localsplus++;
+  }
+
+  // Free variables are initialized.
+  for (std::size_t i = free_offset; i < limit; i++) {
+    const LiveValue* value = meta.getLocalValue(i, frame_meta);
+    if (value == nullptr) {
+      // Already NULL from the initialization pass.
+    } else {
+      PyObject* obj = mem.readOwned(*value).release();
+      Ci_STACK_XSETREF(localsplus[i], obj);
+    }
   }
 }
 
