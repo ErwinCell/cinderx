@@ -280,10 +280,8 @@ GETITEM(PyObject *v, Py_ssize_t i) {
 #define ADAPTIVE_COUNTER_TRIGGERS(COUNTER) \
     backoff_counter_triggers(forge_backoff_counter((COUNTER)))
 
-#define ADVANCE_ADAPTIVE_COUNTER(COUNTER) \
-    if (adaptive_enabled) { \
-        (COUNTER) = advance_backoff_counter((COUNTER)); \
-    }
+#define ADVANCE_ADAPTIVE_COUNTER(COUNTER) (COUNTER) = advance_backoff_counter((COUNTER)); \
+
 
 #define PAUSE_ADAPTIVE_COUNTER(COUNTER) \
     do { \
@@ -431,17 +429,7 @@ do { \
 
 // CO_NO_MONITORING_EVENTS indicates the code object is read-only and therefore
 // cannot have code-extra data added.
-#define CI_SET_ADAPTIVE_INTERPRETER_ENABLED_STATE \
-    do { \
-        PyObject *executable = PyStackRef_AsPyObjectBorrow(frame->f_executable); \
-        if (PyCode_Check(executable)) { \
-            PyCodeObject* code = (PyCodeObject*)executable; \
-            if (!(code->co_flags & CO_NO_MONITORING_EVENTS)) { \
-                CodeExtra *extra = codeExtra(code); \
-                adaptive_enabled = extra != NULL && is_adaptive_enabled(extra); \
-            } \
-        } \
-    } while (0);
+#define CI_SET_ADAPTIVE_INTERPRETER_ENABLED_STATE
 
 #define CI_UPDATE_CALL_COUNT \
     do { \
@@ -450,12 +438,7 @@ do { \
             PyCodeObject* code = (PyCodeObject*)executable; \
             if (!(code->co_flags & CO_NO_MONITORING_EVENTS)) { \
                 CodeExtra *extra = codeExtra(code); \
-                if (extra == NULL) { \
-                    adaptive_enabled = false; \
-                } else { \
-                    Ci_code_extra_incr_calls(extra); \
-                    adaptive_enabled = is_adaptive_enabled(extra); \
-                } \
+                Ci_code_extra_incr_calls(extra); \
             } \
         } \
     } while (0);
