@@ -1358,7 +1358,7 @@ void NativeGenerator::generateFunctionEntry() {
   as_->push(x86::rbp);
   as_->mov(x86::rbp, x86::rsp);
 #elif defined(CINDER_AARCH64)
-  as_->stp(arch::fp, arch::lr, a64::ptr_pre(a64::sp, -16));
+  as_->stp(arch::fp, arch::lr, a64::ptr_pre(a64::sp, -32));
   as_->mov(arch::fp, a64::sp);
 #else
   CINDER_UNSUPPORTED
@@ -1371,7 +1371,7 @@ void NativeGenerator::generateFunctionExit() {
   as_->ret();
 #elif defined(CINDER_AARCH64)
   as_->mov(a64::sp, arch::fp);
-  as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+  as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 32));
   as_->ret(arch::lr);
 #else
   CINDER_UNSUPPORTED
@@ -2772,7 +2772,9 @@ void NativeGenerator::generateStaticEntryPoint(
       // into the generator object when we link the frame. We need to
       // capture the incoming arguments first, which will mean we'll
       // need to save and restore the register.
-      as_->add(a64::x10, arch::fp, 16);
+      // Extra args are above the 32-byte frame (saved fp, lr, savedReturnIP,
+      // padding), so the offset is 32.
+      as_->add(a64::x10, arch::fp, 32);
       save_regs.emplace_back(a64::x10, a64::x10);
       need_extra_args_load = false;
     }
@@ -2788,7 +2790,9 @@ void NativeGenerator::generateStaticEntryPoint(
       a64::x(INITIAL_FUNC_REG.loc), a64::x(INITIAL_TSTATE_REG.loc), save_regs);
 
   if (need_extra_args_load) {
-    as_->add(a64::x10, arch::fp, 16);
+    // Extra args are above the 32-byte frame (saved fp, lr, savedReturnIP,
+    // padding), so the offset is 32.
+    as_->add(a64::x10, arch::fp, 32);
   }
   as_->b(finish_frame_setup);
   env_.addAnnotation("StaticLinkFrame", static_link_cursor);
@@ -2899,7 +2903,7 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
 
     // leave + ret equivalent on aarch64
     as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 32));
     as_->ret(arch::lr);
 #else
     CINDER_UNSUPPORTED
@@ -3202,7 +3206,7 @@ NativeGenerator::generateBoxedReturnWrapper() {
     as_->bind(error);
     as_->mov(a64::x0, 0);
     as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 32));
     as_->ret(arch::lr);
   }
 #else
@@ -3310,7 +3314,7 @@ void NativeGenerator::generateArgcountCheckPrologue(Label correct_arg_count) {
     }
     emitCall(env_, helper, nullptr);
     as_->mov(a64::sp, arch::fp);
-    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 16));
+    as_->ldp(arch::fp, arch::lr, a64::ptr_post(a64::sp, 32));
     as_->ret(arch::lr);
     env_.addAnnotation(
         "Check if called with correct argcount", arg_check_cursor);

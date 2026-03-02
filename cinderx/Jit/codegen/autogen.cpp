@@ -1943,24 +1943,34 @@ void translateCall(Environ* env, const Instruction* instr) {
 
   auto output = instr->output();
   auto input = instr->getInput(0);
-  bool debug_recorded = false;
 
+  // Load call target into a register, then save the return address at
+  // [fp + 16] before calling. This allows getIP() to find the return address
+  // at a fixed offset from the frame base, which is needed for cross-thread
+  // frame inspection (e.g. sys._current_frames()).
+  a64::Gp target;
   if (input->isReg()) {
-    as->blr(AT::getGp(input));
+    target = AT::getGp(input);
   } else if (input->isImm()) {
-    emitCall(*env, static_cast<uint64_t>(input->getConstant()), instr);
-    debug_recorded = true;
+    as->mov(arch::reg_scratch_br, input->getConstant());
+    target = arch::reg_scratch_br;
   } else if (input->isStack()) {
     auto loc = input->getStackSlot().loc;
     as->ldr(
         arch::reg_scratch_br,
         arch::ptr_resolve(as, arch::fp, loc, arch::reg_scratch_0));
-    as->blr(arch::reg_scratch_br);
+    target = arch::reg_scratch_br;
   } else {
     JIT_ABORT("Unsupported operand type for Call: {}", input->type());
   }
 
-  if (instr->origin() && !debug_recorded) {
+  asmjit::Label after_call = as->newLabel();
+  as->adr(arch::reg_scratch_0, after_call);
+  as->str(arch::reg_scratch_0, a64::ptr(arch::fp, 16));
+  as->blr(target);
+  as->bind(after_call);
+
+  if (instr->origin()) {
     asmjit::Label label = as->newLabel();
     as->bind(label);
     env->pending_debug_locs.emplace_back(label, instr->origin());
