@@ -99,6 +99,12 @@ UnitDeletedCallback handle_unit_deleted_during_preload = nullptr;
 std::atomic<int> g_compile_workers_attempted;
 std::atomic<int> g_compile_workers_retries;
 
+uint32_t g_compile_after_n_calls_cache = 0;
+
+void update_compile_after_n_calls_cache(uint32_t value) {
+  g_compile_after_n_calls_cache = value;
+}
+
 // Don't care flags: CO_NOFREE, CO_FUTURE_* (the only still-relevant future is
 // "annotations" which doesn't impact bytecode execution.)
 constexpr int required_code_flags = CO_OPTIMIZED | CO_NEWLOCALS;
@@ -176,7 +182,7 @@ PyObject* forcedJitVectorcall(
     return func->vectorcall(func_obj, stack, nargsf, kwnames);
   }
 
-  auto interp_entry = getInterpretedVectorcall(func);
+  auto interp_entry = Ci_PyFunction_Vectorcall;
 
   // Python errors shouldn't happen during compilation, but if they do, bubble
   // them up without calling the function.
@@ -216,9 +222,7 @@ PyObject* jitVectorcall(
   if (auto limit = getConfig().compile_after_n_calls; limit.has_value()) {
     auto const calls = countCalls(code);
     if (calls < *limit) {
-      incrementShadowcodeCall(code);
-      auto entry = getInterpretedVectorcall(func);
-      return entry(func_obj, stack, nargsf, kwnames);
+      return Ci_PyFunction_Vectorcall(func_obj, stack, nargsf, kwnames);
     }
   }
 
@@ -1303,7 +1307,7 @@ bool deoptFuncImpl(BorrowedRef<PyFunctionObject> func) {
   if (!jitCtx()->removeCompiledFunc(func)) {
     return false;
   }
-  setVectorcall(func, getInterpretedVectorcall(func));
+  setVectorcall(func, Ci_PyFunction_Vectorcall);
   return true;
 }
 
@@ -1724,7 +1728,7 @@ PyObject* lazy_compile(PyObject* /* self */, PyObject* arg) {
 
   setVectorcall(func, forcedJitVectorcall);
   if (!registerFunction(func)) {
-    setVectorcall(func, getInterpretedVectorcall(func));
+    setVectorcall(func, Ci_PyFunction_Vectorcall);
     Py_RETURN_FALSE;
   }
 
@@ -1744,7 +1748,7 @@ PyObject* force_uncompile(PyObject* /* self */, PyObject* arg) {
 
   // Replace the function entrypoint with the interpreter entrypoint, so that it
   // can properly be called again.
-  setVectorcall(func, getInterpretedVectorcall(func));
+  setVectorcall(func, Ci_PyFunction_Vectorcall);
 
   // "Destroy" the function from the perspective of the JIT, effectively erasing
   // all traces of it from the metadata.
@@ -3721,7 +3725,7 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func) {
 
   setVectorcall(func, jitVectorcall);
   if (!registerFunction(func)) {
-    setVectorcall(func, getInterpretedVectorcall(func));
+    setVectorcall(func, Ci_PyFunction_Vectorcall);
     return false;
   }
 

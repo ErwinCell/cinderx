@@ -16,14 +16,7 @@ extern "C" {
 
 vectorcallfunc getInterpretedVectorcall(
     [[maybe_unused]] const PyFunctionObject* func) {
-#ifdef ENABLE_INTERPRETER_LOOP
-  const PyCodeObject* code = (const PyCodeObject*)(func->func_code);
-  return (code->co_flags & CI_CO_STATICALLY_COMPILED)
-      ? Ci_StaticFunction_Vectorcall
-      : Ci_PyFunction_Vectorcall;
-#else
   return Ci_PyFunction_Vectorcall;
-#endif
 }
 
 int Ci_InitFrameEvalFunc() {
