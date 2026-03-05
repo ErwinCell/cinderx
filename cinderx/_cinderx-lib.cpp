@@ -183,12 +183,12 @@ PyObject* watch_sys_modules(PyObject*, PyObject*) {
   }
   auto sys = Ref<>::steal(PyImport_ImportModule("sys"));
   if (sys == nullptr) {
-    Py_RETURN_NONE;
+    return nullptr;
   }
 
   auto modules = Ref<>::steal(PyObject_GetAttrString(sys, "modules"));
   if (modules == nullptr) {
-    Py_RETURN_NONE;
+    return nullptr;
   }
   if (Ci_Watchers_WatchDict(modules) < 0) {
     return nullptr;
@@ -1404,6 +1404,7 @@ int _cinderx_exec_impl(PyObject* m) {
     return -1;
   }
   state->setAnextAwaitableType(anext_awaitable_type);
+  Py_DECREF(anext_awaitable_type);
 
   auto anext_func = Ref<>::steal(PyObject_GetAttrString(m, "anext"));
   if (anext_func == nullptr ||
@@ -1517,7 +1518,13 @@ int _cinderx_exec_impl(PyObject* m) {
   // happens so we can clear out strict modules first, so we register
   // directly with the atexit library.
   auto atexit = Ref<>::steal(PyImport_ImportModule("atexit"));
+  if (atexit == nullptr) {
+    return -1;
+  }
   auto register_func = Ref<>::steal(PyObject_GetAttrString(atexit, "register"));
+  if (register_func == nullptr) {
+    return -1;
+  }
   auto clear_strict_modules_func =
       Ref<>::steal(PyObject_GetAttrString(m, "_clear_strict_modules"));
   if (clear_strict_modules_func == nullptr) {

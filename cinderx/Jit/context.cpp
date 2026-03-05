@@ -108,12 +108,12 @@ std::optional<PyMethodDef*> Builtins::find(const std::string& name) const {
 }
 
 Context::Context()
-    : zero_(Ref<>::create(PyLong_FromLong(0))),
+    : zero_(Ref<>::steal(PyLong_FromLong(0))),
 #if PY_VERSION_HEX >= 0x030C0000
       str_build_class_(Ref<>::create(&_Py_ID(__build_class__)))
 #else
       str_build_class_(
-          Ref<>::create(PyUnicode_InternFromString("__build_class__")))
+          Ref<>::steal(PyUnicode_InternFromString("__build_class__")))
 #endif
 {
 #if PY_VERSION_HEX >= 0x030E0000
@@ -211,6 +211,9 @@ void Context::recordDeopt(
     CodeRuntime* code_runtime,
     std::size_t idx,
     BorrowedRef<> guilty_value) {
+#ifdef Py_GIL_DISABLED
+  std::lock_guard<std::mutex> lock(deopt_stats_mutex_);
+#endif
   DeoptStat& stat = deopt_stats_[code_runtime][idx];
   stat.count++;
   if (guilty_value != nullptr) {
@@ -233,6 +236,9 @@ const DeoptStat* Context::deoptStat(
 }
 
 void Context::clearDeoptStats() {
+#ifdef Py_GIL_DISABLED
+  std::lock_guard<std::mutex> lock(deopt_stats_mutex_);
+#endif
   deopt_stats_.clear();
 }
 
