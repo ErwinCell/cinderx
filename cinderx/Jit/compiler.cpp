@@ -17,6 +17,7 @@
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/printer.h"
+#include "cinderx/Jit/hir/primitive_unbox_cse.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
 #include "cinderx/Jit/hir/ssa.h"
@@ -86,7 +87,14 @@ void Compiler::runPasses(
     }
   };
 
-  runPassIf(hir::Simplify{}, PassConfig::kSimplify);
+  auto runSimplifyPassesIfEnabled = [&]() {
+    if (config & PassConfig::kSimplify) {
+      runPass(hir::Simplify{}, irfunc, callback);
+      runPass(hir::PrimitiveUnboxCSE{}, irfunc, callback);
+    }
+  };
+
+  runSimplifyPassesIfEnabled();
   runPassIf(
       hir::DynamicComparisonElimination{}, PassConfig::kDynamicComparisonElim);
   runPassIf(hir::GuardTypeRemoval{}, PassConfig::kGuardTypeRemoval);
@@ -95,7 +103,7 @@ void Compiler::runPasses(
   if (config & PassConfig::kInliner) {
     runPass(jit::hir::InlineFunctionCalls{}, irfunc, callback);
 
-    runPassIf(hir::Simplify{}, PassConfig::kSimplify);
+    runSimplifyPassesIfEnabled();
     runPassIf(
         hir::BeginInlinedFunctionElimination{},
         PassConfig::kBeginInlinedFunctionElim);
@@ -103,7 +111,7 @@ void Compiler::runPasses(
 
   runPassIf(
       hir::BuiltinLoadMethodElimination{}, PassConfig::kBuiltinLoadMethodElim);
-  runPassIf(hir::Simplify{}, PassConfig::kSimplify);
+  runSimplifyPassesIfEnabled();
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
   runPassIf(hir::DeadCodeElimination{}, PassConfig::kDeadCodeElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);

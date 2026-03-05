@@ -437,6 +437,50 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIn("DoubleBinaryOp<Subtract>", dump)
             self.assertIn("DoubleBinaryOp<Multiply>", dump)
 
+    def test_primitive_unbox_cse_for_float_add_self(self) -> None:
+        # Regression guard:
+        # for g(x) = x + x (float path), final HIR should keep a single
+        # PrimitiveUnbox<CDouble> and reuse it for both operands.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def g(x):
+                return x + x
+
+            for _ in range(10000):
+                g(0.01)
+
+            assert jit.force_compile(g)
+            counts = cinderjit.get_function_hir_opcode_counts(g)
+            print(counts.get("PrimitiveUnbox", -1))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/primitive_unbox_cse.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            self.assertEqual(int(proc.stdout.strip().splitlines()[-1]), 1, proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
