@@ -2,6 +2,21 @@
 
 // Macros and other things needed by ceval.c, and bytecodes.c
 
+#ifndef CI_LIKELY
+#if defined(__GNUC__) || defined(__clang__)
+#define CI_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define CI_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define CI_LIKELY(x)   (x)
+#define CI_UNLIKELY(x) (x)
+#endif
+#endif
+
+#ifndef CI_HOT_PATH
+#define CI_HOT_PATH    CI_LIKELY
+#define CI_COLD_PATH   CI_UNLIKELY
+#endif
+
 /* Computed GOTOs, or
        the-optimization-commonly-but-improperly-known-as-"threaded code"
    using gcc's labels-as-values extension

@@ -149,7 +149,7 @@ dummy_func(
             PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
 
             assert((oparg & 1) == 0);
-            DEOPT_IF(IS_PEP523_HOOKED(tstate));
+            DEOPT_IF(CI_UNLIKELY(IS_PEP523_HOOKED(tstate)));
             PyTypeObject *cls = Py_TYPE(owner_o);
             assert(type_version != 0);
             DEOPT_IF(FT_ATOMIC_LOAD_UINT_RELAXED(cls->tp_version_tag) != type_version);
@@ -185,9 +185,9 @@ dummy_func(
                 total_args++;
             }
             // Check if the call can be inlined or not
-            if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+            if (CI_LIKELY(Py_TYPE(callable_o) == &PyFunction_Type) &&
+                CI_LIKELY(!IS_PEP523_HOOKED(tstate)) &&
+                CI_LIKELY(((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall))
             {
                 int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                 PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
@@ -243,7 +243,7 @@ dummy_func(
         }
 
         override op(_CHECK_PEP_523, (--)) {
-            DEOPT_IF(IS_PEP523_HOOKED(tstate));
+            DEOPT_IF(CI_UNLIKELY(IS_PEP523_HOOKED(tstate)));
         }
 
         override op(_PUSH_FRAME, (new_frame: _PyInterpreterFrame* -- )) {
@@ -279,9 +279,9 @@ dummy_func(
             }
             int positional_args = total_args - (int)PyTuple_GET_SIZE(kwnames_o);
             // Check if the call can be inlined or not
-            if (Py_TYPE(callable_o) == &PyFunction_Type &&
-                !IS_PEP523_HOOKED(tstate) &&
-                ((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall)
+            if (CI_LIKELY(Py_TYPE(callable_o) == &PyFunction_Type) &&
+                CI_LIKELY(!IS_PEP523_HOOKED(tstate)) &&
+                CI_LIKELY(((PyFunctionObject *)callable_o)->vectorcall == _PyFunction_Vectorcall))
             {
                 int code_flags = ((PyCodeObject*)PyFunction_GET_CODE(callable_o))->co_flags;
                 PyObject *locals = code_flags & CO_OPTIMIZED ? NULL : Py_NewRef(PyFunction_GET_GLOBALS(callable_o));
@@ -378,9 +378,9 @@ dummy_func(
                 }
             }
             else {
-                if (Py_TYPE(func) == &PyFunction_Type &&
-                    !IS_PEP523_HOOKED(tstate) &&
-                    ((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall) {
+                if (CI_LIKELY(Py_TYPE(func) == &PyFunction_Type) &&
+                    CI_LIKELY(!IS_PEP523_HOOKED(tstate)) &&
+                    CI_LIKELY(((PyFunctionObject *)func)->vectorcall == _PyFunction_Vectorcall)) {
                     PyObject *callargs = PyStackRef_AsPyObjectSteal(callargs_st);
                     assert(PyTuple_CheckExact(callargs));
                     PyObject *kwargs = PyStackRef_IsNull(kwargs_st) ? NULL : PyStackRef_AsPyObjectSteal(kwargs_st);
@@ -420,9 +420,9 @@ dummy_func(
             PyObject *receiver_o = PyStackRef_AsPyObjectBorrow(receiver);
             PyObject *retval_o;
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
-            if (!IS_PEP523_HOOKED(tstate) &&
-                (Py_TYPE(receiver_o) == &PyGen_Type || Py_TYPE(receiver_o) == &PyCoro_Type) &&
-                ((PyGenObject *)receiver_o)->gi_frame_state < FRAME_EXECUTING)
+            if (CI_LIKELY(!IS_PEP523_HOOKED(tstate)) &&
+                CI_LIKELY(Py_TYPE(receiver_o) == &PyGen_Type || Py_TYPE(receiver_o) == &PyCoro_Type) &&
+                CI_LIKELY(((PyGenObject *)receiver_o)->gi_frame_state < FRAME_EXECUTING))
             {
                 PyGenObject *gen = (PyGenObject *)receiver_o;
                 _PyInterpreterFrame *gen_frame = &gen->gi_iframe;
