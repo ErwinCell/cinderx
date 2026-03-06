@@ -15,12 +15,10 @@
 #include <mutex>
 #endif
 #include <parallel_hashmap/phmap.h>
+#include <set>
 #include <vector>
 
 namespace jit {
-
-// Cache line size for alignment optimization
-constexpr size_t kCacheLineSize = 64;
 
 // Identifies a cached global Python value.
 struct GlobalCacheKey {
@@ -36,26 +34,6 @@ struct GlobalCacheKey {
       BorrowedRef<PyUnicodeObject> name);
 
   ~GlobalCacheKey();
-
-  GlobalCacheKey(const GlobalCacheKey&) = delete;
-  GlobalCacheKey& operator=(const GlobalCacheKey&) = delete;
-  
-  GlobalCacheKey(GlobalCacheKey&& other) noexcept
-      : builtins(other.builtins), globals(other.globals), name(std::move(other.name)) {
-    other.builtins = nullptr;
-    other.globals = nullptr;
-  }
-  
-  GlobalCacheKey& operator=(GlobalCacheKey&& other) noexcept {
-    if (this != &other) {
-      builtins = other.builtins;
-      globals = other.globals;
-      name = std::move(other.name);
-      other.builtins = nullptr;
-      other.globals = nullptr;
-    }
-    return *this;
-  }
 
   bool operator==(const GlobalCacheKey& other) const = default;
 };
@@ -86,26 +64,14 @@ class GlobalCache {
   GlobalCacheMap::value_type* pair_;
 };
 
-// Optimized watch map using flat_hash_map
-// Key: (dict, name) pair, Value: vector of watchers
-struct DictKeyPair {
-  BorrowedRef<PyDictObject> dict;
-  BorrowedRef<PyUnicodeObject> name;
-  
-  bool operator==(const DictKeyPair& other) const {
-    return dict == other.dict && name == other.name;
+// Custom hasher for BorrowedRef for use with phmap
+template <typename T>
+struct BorrowedRefHash {
+  std::size_t operator()(BorrowedRef<T> ref) const {
+    std::hash<T*> hasher;
+    return hasher(ref.get());
   }
 };
-
-struct DictKeyPairHash {
-  std::size_t operator()(const DictKeyPair& key) const {
-    std::hash<PyObject*> hasher;
-    return hasher(key.dict) ^ (hasher(key.name) << 1);
-  }
-};
-
-// Optimized watch map with flat_hash_map for better cache locality
-using WatchMapInner = phmap::flat_hash_map<DictKeyPair, std::vector<GlobalCache>, DictKeyPairHash>;
 
 // Manages all memory and data structures for global cache values.
 class GlobalCacheManager : public IGlobalCacheManager {
@@ -169,8 +135,17 @@ class GlobalCacheManager : public IGlobalCacheManager {
   // Optimized flat_hash_map for global caches - better cache locality
   GlobalCacheMap map_;
 
-  // Optimized watch map using flat_hash_map
-  WatchMapInner watch_map_;
+  // Two-level map keeping track of which global value caches are subscribed to
+  // which keys in which dicts.
+  // Using phmap for better performance with custom hashers
+  phmap::flat_hash_map<
+      BorrowedRef<PyDictObject>,
+      phmap::flat_hash_map<
+          BorrowedRef<PyUnicodeObject>,
+          std::set<GlobalCache>,
+          BorrowedRefHash<PyUnicodeObject>>,
+      BorrowedRefHash<PyDictObject>>
+      watch_map_;
 };
 
 } // namespace jit
