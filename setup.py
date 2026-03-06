@@ -384,11 +384,22 @@ class BuildPy(build_py):
 
         # Copy opcodes/${PY_VERSION}/opcode.py to cinderx/opcode.py.
         py_version = compute_py_version()
+        opcode_src = os.path.join(PYTHON_LIB_DIR, f"opcodes/{py_version}/opcode.py")
         out_path = self.get_module_outfile(self.build_lib, ["cinderx"], "opcode")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         self.copy_file(
-            os.path.join(PYTHON_LIB_DIR, f"opcodes/{py_version}/opcode.py"),
+            opcode_src,
             out_path,
+            preserve_mode=False,
+        )
+
+        # Editable installs extend sys.path with the source tree rather than the
+        # temporary build output, so keep the generated opcode module alongside
+        # the package sources as well.
+        source_opcode_path = os.path.join(self.get_package_dir("cinderx"), "opcode.py")
+        self.copy_file(
+            opcode_src,
+            source_opcode_path,
             preserve_mode=False,
         )
 
