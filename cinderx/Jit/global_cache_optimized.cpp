@@ -1,14 +1,15 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
+// Optimized global cache implementation with parallel-hashmap
 
-#include "cinderx/Jit/global_cache.h"
-
-#if !CINDERX_OPTIMIZED_GLOBAL_CACHE
+#include "cinderx/Jit/global_cache_optimized.h"
 
 #include "cinderx/Common/dict.h"
 #include "cinderx/Common/util.h"
 #include "cinderx/Common/watchers.h"
 #include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/module_state.h"
+
+#include <algorithm>
 
 #ifndef ENABLE_LAZY_IMPORTS
 #ifdef PyLazyImport_CheckExact
@@ -18,6 +19,10 @@
 #endif
 
 namespace jit {
+
+// ============================================================================
+// GlobalCacheKey Implementation
+// ============================================================================
 
 GlobalCacheKey::GlobalCacheKey(
     BorrowedRef<PyDictObject> builtins,
@@ -43,27 +48,9 @@ std::size_t GlobalCacheKeyHash::operator()(const GlobalCacheKey& key) const {
       hasher(key.builtins), hasher(key.globals), hasher(key.name));
 }
 
-GlobalCache::GlobalCache(GlobalCacheMap::value_type* pair) : pair_(pair) {}
-
-const GlobalCacheKey& GlobalCache::key() const {
-  return pair_->first;
-}
-
-PyObject** GlobalCache::valuePtr() const {
-  return pair_->second;
-}
-
-void GlobalCache::init(PyObject** cache) const {
-  pair_->second = cache;
-}
-
-void GlobalCache::clear() {
-  *valuePtr() = nullptr;
-}
-
-bool GlobalCache::operator<(const GlobalCache& other) const {
-  return pair_ < other.pair_;
-}
+// ============================================================================
+// GlobalCacheManager Implementation
+// ============================================================================
 
 GlobalCacheManager::~GlobalCacheManager() {
   clear();
@@ -73,10 +60,12 @@ GlobalCache GlobalCacheManager::findGlobalCache(
     BorrowedRef<PyDictObject> builtins,
     BorrowedRef<PyDictObject> globals,
     BorrowedRef<PyUnicodeObject> key) {
+  // Use emplace with piecewise_construct for in-place construction
   auto result = map_.emplace(
       std::piecewise_construct,
       std::forward_as_tuple(builtins, globals, key),
       std::forward_as_tuple());
+  
   GlobalCache cache(&*result.first);
 
   // This is a new global cache entry, so we have to initialize it.
@@ -113,18 +102,18 @@ void GlobalCacheManager::notifyDictUpdate(
 #ifdef Py_GIL_DISABLED
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 #endif
-  auto dict_it = watch_map_.find(dict);
-  // Something else in Cinderx could be watching this dict. Return early if no
-  // matchers were registered.
-  if (dict_it == watch_map_.end()) {
+
+  DictKeyPair pair{dict, key};
+  auto it = watch_map_.find(pair);
+  if (it == watch_map_.end()) {
     return;
   }
-  auto key_it = dict_it->second.find(key);
-  if (key_it == dict_it->second.end()) {
-    return;
-  }
+  
+  // Copy watchers to avoid modification during iteration
+  std::vector<GlobalCache> watchers_copy = it->second;
+  
   std::vector<GlobalCache> to_disable;
-  for (GlobalCache cache : key_it->second) {
+  for (GlobalCache cache : watchers_copy) {
     if (updateCache(cache, dict, value)) {
       to_disable.emplace_back(cache);
     }
@@ -136,20 +125,21 @@ void GlobalCacheManager::notifyDictClear(BorrowedRef<PyDictObject> dict) {
 #ifdef Py_GIL_DISABLED
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 #endif
-  auto dict_it = watch_map_.find(dict);
-  // Something else in Cinderx could be watching this dict. Return early if no
-  // matchers were registered.
-  if (dict_it == watch_map_.end()) {
-    return;
-  }
+
+  // Collect all caches that need to be updated
   std::vector<GlobalCache> to_disable;
-  for (auto& key_pair : dict_it->second) {
-    for (GlobalCache cache : key_pair.second) {
-      if (updateCache(cache, dict, nullptr)) {
-        to_disable.emplace_back(cache);
+  
+  // Iterate through watch_map_ to find entries for this dict
+  for (auto it = watch_map_.begin(); it != watch_map_.end(); ++it) {
+    if (it->first.dict == dict) {
+      for (GlobalCache cache : it->second) {
+        if (updateCache(cache, dict, nullptr)) {
+          to_disable.emplace_back(cache);
+        }
       }
     }
   }
+  
   disableCaches(to_disable);
 }
 
@@ -157,34 +147,44 @@ void GlobalCacheManager::notifyDictUnwatch(BorrowedRef<PyDictObject> dict) {
 #ifdef Py_GIL_DISABLED
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 #endif
-  auto dict_it = watch_map_.find(dict);
-  // Something else in Cinderx could be watching this dict. Return early if no
-  // matchers were registered.
-  if (dict_it == watch_map_.end()) {
-    return;
-  }
-  for (auto& pair : dict_it->second) {
-    for (auto cache : pair.second) {
-      // Unsubscribe from the corresponding globals/builtins dict if needed.
-      PyObject* globals = cache.key().globals;
-      PyObject* builtins = cache.key().builtins;
-      if (globals != builtins) {
-        if (dict == globals) {
-          // when shutting down builtins goes away and we won't be
-          // watching builtins if the value we are watching was defined
-          // globally at the module level but was never deleted.
-          if (isWatchedDictKey(builtins, cache.key().name, cache)) {
-            unwatchDictKey(builtins, cache.key().name, cache);
-          }
-        } else {
-          unwatchDictKey(globals, cache.key().name, cache);
-        }
-      }
 
-      disableCache(cache);
+  std::vector<GlobalCache> to_disable;
+  std::vector<DictKeyPair> to_remove;
+
+  // Find all watch entries for this dict
+  for (auto it = watch_map_.begin(); it != watch_map_.end(); ++it) {
+    if (it->first.dict == dict) {
+      for (auto cache : it->second) {
+        // Unsubscribe from the corresponding globals/builtins dict if needed.
+        PyObject* globals = cache.key().globals;
+        PyObject* builtins = cache.key().builtins;
+        if (globals != builtins) {
+          if (dict == globals) {
+            // when shutting down builtins goes away and we won't be
+            // watching builtins if the value we are watching was defined
+            // globally at the module level but was never deleted.
+            if (isWatchedDictKey(builtins, cache.key().name, cache)) {
+              unwatchDictKey(builtins, cache.key().name, cache);
+            }
+          } else {
+            unwatchDictKey(globals, cache.key().name, cache);
+          }
+        }
+
+        to_disable.emplace_back(cache);
+      }
+      to_remove.push_back(it->first);
     }
   }
-  watch_map_.erase(dict_it);
+  
+  // Remove watch entries
+  for (const auto& pair : to_remove) {
+    watch_map_.erase(pair);
+  }
+  
+  for (GlobalCache cache : to_disable) {
+    disableCache(cache);
+  }
 }
 
 void GlobalCacheManager::clear() {
@@ -192,17 +192,16 @@ void GlobalCacheManager::clear() {
 #ifdef Py_GIL_DISABLED
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 #endif
-  for (auto& pair : watch_map_) {
-    keys.push_back(pair.first);
+  
+  // Collect all unique dicts from watch_map_
+  phmap::flat_hash_set<BorrowedRef<PyDictObject>> dicts;
+  for (const auto& pair : watch_map_) {
+    dicts.insert(pair.first.dict);
   }
-  for (auto dict : keys) {
-    auto dict_it = watch_map_.find(dict);
-    // notifyDictUnwatch may clear out our dictionary and builtins,
-    // so we need to make sure each dictionary is still being watched
-    if (dict_it != watch_map_.end()) {
-      notifyDictUnwatch(dict);
-      cinderx::getModuleState()->watcherState().unwatchDict(dict);
-    }
+  
+  for (auto dict : dicts) {
+    notifyDictUnwatch(dict);
+    cinderx::getModuleState()->watcherState().unwatchDict(dict);
   }
 }
 
@@ -210,25 +209,24 @@ bool GlobalCacheManager::isWatchedDictKey(
     BorrowedRef<PyDictObject> dict,
     BorrowedRef<PyUnicodeObject> key,
     GlobalCache cache) {
-  auto dict_it = watch_map_.find(dict);
-  if (dict_it == watch_map_.end()) {
+  DictKeyPair pair{dict, key};
+  auto it = watch_map_.find(pair);
+  if (it == watch_map_.end()) {
     return false;
   }
-  auto& dict_keys = dict_it->second;
-  auto key_it = dict_keys.find(key);
-  if (key_it != dict_keys.end()) {
-    return key_it->second.contains(cache);
-  }
-  return false;
+  
+  const auto& watchers = it->second;
+  return std::find(watchers.begin(), watchers.end(), cache) != watchers.end();
 }
 
 void GlobalCacheManager::watchDictKey(
     BorrowedRef<PyDictObject> dict,
     BorrowedRef<PyUnicodeObject> key,
     GlobalCache cache) {
-  auto& watchers = watch_map_[dict][key];
-  bool inserted = watchers.emplace(cache).second;
-  JIT_CHECK(inserted, "cache was already watching key");
+  DictKeyPair pair{dict, key};
+  auto& watchers = watch_map_[pair];
+  watchers.push_back(cache);
+  
   JIT_CHECK(
       cinderx::getModuleState()->watcherState().watchDict(dict) == 0,
       "Failed to watch globals or builtins dict");
@@ -238,22 +236,32 @@ void GlobalCacheManager::unwatchDictKey(
     BorrowedRef<PyDictObject> dict,
     BorrowedRef<PyUnicodeObject> key,
     GlobalCache cache) {
-  auto dict_it = watch_map_.find(dict);
-  JIT_CHECK(dict_it != watch_map_.end(), "dict has no watchers");
-  auto& dict_keys = dict_it->second;
-  auto key_it = dict_keys.find(key);
-  JIT_CHECK(key_it != dict_it->second.end(), "key has no watchers");
-  auto& key_watchers = key_it->second;
-  auto cache_it = key_watchers.find(cache);
-  JIT_CHECK(cache_it != key_watchers.end(), "cache was not watching key");
-  key_watchers.erase(cache_it);
-  if (key_watchers.empty()) {
-    dict_keys.erase(key_it);
-    if (dict_keys.empty()) {
-      watch_map_.erase(dict_it);
-      JIT_CHECK(
-          cinderx::getModuleState()->watcherState().unwatchDict(dict) == 0,
-          "Failed to unwatch globals or builtins dictionary");
+  DictKeyPair pair{dict, key};
+  auto it = watch_map_.find(pair);
+  if (it == watch_map_.end()) {
+    return;
+  }
+  
+  auto& watchers = it->second;
+  auto cache_it = std::find(watchers.begin(), watchers.end(), cache);
+  if (cache_it != watchers.end()) {
+    watchers.erase(cache_it);
+  }
+  
+  if (watchers.empty()) {
+    watch_map_.erase(it);
+    
+    // Check if dict has any more watchers
+    bool has_more = false;
+    for (const auto& p : watch_map_) {
+      if (p.first.dict == dict) {
+        has_more = true;
+        break;
+      }
+    }
+    
+    if (!has_more) {
+      cinderx::getModuleState()->watcherState().unwatchDict(dict);
     }
   }
 }
@@ -358,5 +366,3 @@ void GlobalCacheManager::disableCaches(const std::vector<GlobalCache>& caches) {
 }
 
 } // namespace jit
-
-#endif // !CINDERX_OPTIMIZED_GLOBAL_CACHE
