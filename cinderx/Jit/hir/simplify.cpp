@@ -671,8 +671,13 @@ Register* simplifyLoadModuleMethodCached(
     const LoadMethod* load_meth) {
   Register* receiver = load_meth->GetOperand(0);
   int name_idx = load_meth->name_idx();
+#if PY_VERSION_HEX >= 0x030E0000
+  return env.emit<LoadModuleAttrCached>(
+      receiver, name_idx, *load_meth->frameState());
+#else
   return env.emit<LoadModuleMethodCached>(
       receiver, name_idx, *load_meth->frameState());
+#endif
 }
 
 Register* simplifyLoadTypeMethodCached(Env& env, const LoadMethod* load_meth) {
@@ -713,6 +718,16 @@ Register* simplifyLoadMethod(Env& env, const LoadMethod* load_meth) {
       load_meth->GetOperand(0),
       load_meth->name_idx(),
       *load_meth->frameState());
+}
+
+Register* simplifyGetSecondOutput(Env& env, const GetSecondOutput* instr) {
+#if PY_VERSION_HEX >= 0x030E0000
+  Register* src = modelReg(instr->GetOperand(0));
+  if (src->instr()->IsLoadModuleAttrCached()) {
+    return env.emit<LoadConst>(TNullptr);
+  }
+#endif
+  return nullptr;
 }
 
 Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
@@ -2009,6 +2024,9 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 
     case Opcode::kGetLength:
       return simplifyGetLength(env, static_cast<const GetLength*>(instr));
+    case Opcode::kGetSecondOutput:
+      return simplifyGetSecondOutput(
+          env, static_cast<const GetSecondOutput*>(instr));
 
     case Opcode::kIntConvert:
       return simplifyIntConvert(env, static_cast<const IntConvert*>(instr));

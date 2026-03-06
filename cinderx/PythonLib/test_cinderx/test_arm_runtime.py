@@ -276,7 +276,10 @@ class ArmRuntimeTests(unittest.TestCase):
         self.assertEqual(f2(9.0), 6.0)
 
         delta = size2 - size1
-        self.assertGreaterEqual(delta, 364, (size1, size2, delta))
+        # Module-method simplification on 3.14 makes each extra call site
+        # materially cheaper, but a second site should still add noticeable
+        # native code.
+        self.assertGreaterEqual(delta, 256, (size1, size2, delta))
 
     def test_aarch64_duplicate_call_result_arg_chain_is_compact(self) -> None:
         # Regression guard for call-result move chains:
@@ -436,6 +439,63 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIn("DoubleBinaryOp<Add>", dump)
             self.assertIn("DoubleBinaryOp<Subtract>", dump)
             self.assertIn("DoubleBinaryOp<Multiply>", dump)
+
+    def test_module_method_hir_uses_null_self_vectorcall(self) -> None:
+        # Regression guard:
+        # module LOAD_METHOD shapes on 3.14 should simplify to callable-only
+        # loads plus a nullptr self, allowing CallMethod to fold into
+        # VectorCall without keeping LoadModuleMethodCached/GetSecondOutput.
+        code = textwrap.dedent(
+            """
+            import math
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            src = ["def f(x):", "    s = 0.0"]
+            src.extend(["    s += math.sqrt(x)"] * 16)
+            src.append("    return s")
+            ns = {"math": math}
+            exec("\\n".join(src), ns, ns)
+            f = ns["f"]
+
+            for _ in range(10000):
+                f(9.0)
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("LoadModuleMethodCached", 0))
+            print(counts.get("GetSecondOutput", 0))
+            print(counts.get("VectorCall", 0))
+            print(f(9.0))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/module_method_vectorcall.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(float(lines[-1]), 48.0, proc.stdout)
 
     def test_primitive_unbox_cse_for_float_add_self(self) -> None:
         # Regression guard:
