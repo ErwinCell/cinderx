@@ -331,6 +331,12 @@ class BuildPy(build_py):
         with open(dev_build_file, "w") as f:
             f.write("\n")
 
+        # Copy .pth file to build_lib root for auto-import on Python startup
+        pth_source = os.path.join(PYTHON_LIB_DIR, "cinderx.pth")
+        pth_dest = os.path.join(self.build_lib, "cinderx.pth")
+        print(f"Copying .pth file to {pth_dest}")
+        self.copy_file(pth_source, pth_dest, preserve_mode=False)
+
 
 class CMakeExtension(Extension):
     """

@@ -1509,6 +1509,10 @@ int _cinderx_exec_impl(PyObject* m) {
     return -1;
   }
 
+  if (Ci_InitFrameEvalFunc() < 0) {
+    return -1;
+  }
+
   return 0;
 }
 
