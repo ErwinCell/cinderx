@@ -2797,28 +2797,77 @@ void HIRBuilder::emitLoadAttr(
     const jit::BytecodeInstruction& bc_instr) {
   int oparg = bc_instr.oparg();
   int name_idx = loadAttrIndex(oparg);
-
-  // In 3.12 LOAD_METHOD has been merged into LOAD_ATTR, and the oparg tells you
-  // which one it should be.
-  if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    if (oparg & 1) {
-      emitLoadMethod(tc, name_idx);
-      return;
-    }
-  }
-
   Register* receiver = tc.frame.stack.pop();
+  bool is_method =
+#if PY_VERSION_HEX >= 0x030C0000
+      (oparg & 1) != 0;
+#else
+      false;
+#endif
 
   if (getConfig().specialized_opcodes) {
+    auto emit_slot_type_version_guard =
+        [&](uint32_t type_version, const char* descr) -> Register* {
+      Register* obj_type = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          obj_type, receiver, "ob_type", offsetof(PyObject, ob_type), TType);
+
+      Register* version = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          version,
+          obj_type,
+          "tp_version_tag",
+          offsetof(PyTypeObject, tp_version_tag),
+          TCUInt32);
+
+      Register* expected = temps_.AllocateStack();
+      tc.emit<LoadConst>(expected, Type::fromCUInt(type_version, TCUInt32));
+
+      Register* matches = temps_.AllocateStack();
+      tc.emit<PrimitiveCompare>(
+          matches, PrimitiveCompareOp::kEqual, version, expected);
+      auto* guard = tc.emit<Guard>(matches, tc.frame);
+      guard->setGuiltyReg(receiver);
+      guard->setDescr(descr);
+      return obj_type;
+    };
+
     switch (bc_instr.specializedOpcode()) {
       case LOAD_ATTR_MODULE: {
         Type type = Type::fromTypeExact(&PyModule_Type);
         tc.emit<GuardType>(receiver, type, receiver, tc.frame);
         break;
       }
+      case LOAD_ATTR_SLOT: {
+        BorrowedRef<PyUnicodeObject> name =
+            PyTuple_GET_ITEM(code_->co_names, name_idx);
+        const char* field_name = PyUnicode_AsUTF8(name);
+        if (field_name == nullptr) {
+          PyErr_Clear();
+          field_name = "<unknown>";
+        }
+        emit_slot_type_version_guard(bc_instr.cacheU32(2), "LOAD_ATTR_SLOT");
+        Register* result = temps_.AllocateStack();
+        tc.emit<LoadField>(
+            result, receiver, field_name, bc_instr.cacheU16(4), TOptObject);
+        CheckField* cf = tc.emit<CheckField>(result, result, name, tc.frame);
+        cf->setGuiltyReg(receiver);
+        tc.frame.stack.push(result);
+        return;
+      }
       default:
         break;
     }
+  }
+
+  if (is_method) {
+    Register* result = temps_.AllocateStack();
+    Register* method_instance = temps_.AllocateStack();
+    tc.emit<LoadMethod>(result, receiver, name_idx, tc.frame);
+    tc.emit<GetSecondOutput>(method_instance, TOptObject, result);
+    tc.frame.stack.push(result);
+    tc.frame.stack.push(method_instance);
+    return;
   }
 
   Register* result = temps_.AllocateStack();
@@ -3866,6 +3915,57 @@ void HIRBuilder::emitStoreAttr(
     const jit::BytecodeInstruction& bc_instr) {
   Register* receiver = tc.frame.stack.pop();
   Register* value = tc.frame.stack.pop();
+  if (getConfig().specialized_opcodes &&
+      bc_instr.specializedOpcode() == STORE_ATTR_SLOT) {
+    auto emit_slot_type_version_guard = [&](uint32_t type_version, const char* descr) {
+      Register* obj_type = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          obj_type, receiver, "ob_type", offsetof(PyObject, ob_type), TType);
+
+      Register* version = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          version,
+          obj_type,
+          "tp_version_tag",
+          offsetof(PyTypeObject, tp_version_tag),
+          TCUInt32);
+
+      Register* expected = temps_.AllocateStack();
+      tc.emit<LoadConst>(expected, Type::fromCUInt(type_version, TCUInt32));
+
+      Register* matches = temps_.AllocateStack();
+      tc.emit<PrimitiveCompare>(
+          matches, PrimitiveCompareOp::kEqual, version, expected);
+      auto* guard = tc.emit<Guard>(matches, tc.frame);
+      guard->setGuiltyReg(receiver);
+      guard->setDescr(descr);
+    };
+
+    BorrowedRef<PyUnicodeObject> name =
+        PyTuple_GET_ITEM(code_->co_names, bc_instr.oparg());
+    const char* field_name = PyUnicode_AsUTF8(name);
+    if (field_name == nullptr) {
+      PyErr_Clear();
+      field_name = "<unknown>";
+    }
+    emit_slot_type_version_guard(bc_instr.cacheU32(2), "STORE_ATTR_SLOT");
+    Register* previous = temps_.AllocateStack();
+    tc.emit<LoadField>(
+        previous,
+        receiver,
+        field_name,
+        bc_instr.cacheU16(4),
+        TOptObject,
+        /* borrowed= */ false);
+    tc.emit<StoreField>(
+        receiver,
+        field_name,
+        bc_instr.cacheU16(4),
+        value,
+        TOptObject,
+        previous);
+    return;
+  }
   tc.emit<StoreAttr>(receiver, value, bc_instr.oparg(), tc.frame);
 }
 

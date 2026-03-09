@@ -1427,6 +1427,47 @@ Register* simplifyLoadAttrGenericDescriptor(Env& env, const DescrInfo& info) {
   return env.emit<CheckExc>(call->output(), *info.frame_state);
 }
 
+bool simplifyStoreAttrMemberDescr(
+    Env& env,
+    const DescrInfo& info,
+    Register* value) {
+  if (Py_TYPE(info.descr) != &PyMemberDescr_Type) {
+    return false;
+  }
+
+  PyMemberDef* def =
+      reinterpret_cast<PyMemberDescrObject*>(info.descr.get())->d_member;
+  if ((def->flags & READONLY) != 0) {
+    return false;
+  }
+  if (def->type != T_OBJECT && def->type != T_OBJECT_EX) {
+    return false;
+  }
+
+  const char* name_cstr = PyUnicode_AsUTF8(info.attr_name);
+  if (name_cstr == nullptr) {
+    PyErr_Clear();
+    name_cstr = "<unknown>";
+  }
+
+  emitTypeAttrDeoptPatcher(env, info, "member descriptor attribute");
+  env.emit<UseType>(info.receiver, info.type);
+  Register* previous = env.emit<LoadField>(
+      info.receiver,
+      name_cstr,
+      def->offset,
+      TOptObject,
+      /* borrowed= */ false);
+  env.emitInstr<StoreField>(
+      info.receiver,
+      name_cstr,
+      def->offset,
+      value,
+      TOptObject,
+      previous);
+  return true;
+}
+
 // Attempt to handle LOAD_ATTR cases where the load is a common case for object
 // instances (not types).
 Register* simplifyLoadAttrInstanceReceiver(
@@ -1568,7 +1609,43 @@ Register* simplifyIsNegativeAndErrOccurred(
   return env.emit<LoadConst>(Type::fromCInt(0, output_type));
 }
 
+bool simplifyStoreAttrInstanceReceiver(Env& env, const StoreAttr* store_attr) {
+  Register* receiver = store_attr->GetOperand(0);
+  Type type = receiver->type();
+  BorrowedRef<PyTypeObject> py_type{type.runtimePyType()};
+
+  if (!type.isExact() || py_type == nullptr ||
+      !PyType_HasFeature(py_type, Py_TPFLAGS_READY) ||
+      py_type->tp_setattro != PyObject_GenericSetAttr) {
+    return false;
+  }
+  if (getThreadedCompileContext().compileRunning()) {
+    if (!Ci_Type_HasValidVersionTag(py_type)) {
+      return false;
+    }
+  } else if (!ensureVersionTag(py_type)) {
+    return false;
+  }
+
+  BorrowedRef<PyUnicodeObject> attr_name{store_attr->name()};
+  if (!PyUnicode_CheckExact(attr_name)) {
+    return false;
+  }
+
+  BorrowedRef<> descr{typeLookupSafe(py_type, attr_name)};
+  if (descr == nullptr) {
+    return false;
+  }
+
+  DescrInfo info{
+      store_attr->frameState(), receiver, type, py_type, attr_name, descr};
+  return simplifyStoreAttrMemberDescr(env, info, store_attr->GetOperand(1));
+}
+
 Register* simplifyStoreAttr(Env& env, const StoreAttr* store_attr) {
+  if (simplifyStoreAttrInstanceReceiver(env, store_attr)) {
+    return nullptr;
+  }
   if (getConfig().attr_caches) {
     return env.emit<StoreAttrCached>(
         store_attr->GetOperand(0),

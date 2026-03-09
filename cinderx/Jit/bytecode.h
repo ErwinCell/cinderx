@@ -42,6 +42,8 @@ class BytecodeInstruction {
   int opcode() const;
   int specializedOpcode() const;
   int oparg() const;
+  uint16_t cacheU16(int instruction_offset) const;
+  uint32_t cacheU32(int instruction_offset) const;
 
   // Check if this instruction is a branch, a return, or a general basic block
   // terminator.

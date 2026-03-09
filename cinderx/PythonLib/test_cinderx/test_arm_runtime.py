@@ -315,6 +315,114 @@ class ArmRuntimeTests(unittest.TestCase):
         self.assertLessEqual(size, 44700, size)
         self.assertEqual(f(9.0), float(n_calls) * 27.0)
 
+    def test_member_descriptor_store_simplifies_to_store_field(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Counter:
+                __slots__ = ('value',)
+
+            obj = Counter()
+            obj.value = 0
+
+            def f(v):
+                obj.value = v
+                return obj.value
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("LoadField", 0))
+            print(counts.get("StoreField", 0))
+            print(counts.get("StoreAttrCached", 0))
+            print(f(7))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/member_descr_store_field.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 7, proc.stdout)
+
+    def test_slot_specialized_opcodes_lower_to_field_ops(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Counter:
+                __slots__ = ('value',)
+                def increment(self):
+                    self.value = self.value + 1
+
+            c = Counter()
+            c.value = 0
+            for _ in range(200000):
+                c.increment()
+
+            assert jit.force_compile(Counter.increment)
+            counts = cinderjit.get_function_hir_opcode_counts(Counter.increment)
+            print(counts.get("LoadField", 0))
+            print(counts.get("StoreField", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(counts.get("StoreAttrCached", 0))
+            c.increment()
+            print(c.value)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/slot_specialized_field_ops.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 200001, proc.stdout)
+
     def test_int_binary_identity_simplify_reduces_compiled_size(self) -> None:
         # Regression guard for IntBinaryOp identity simplification in HIR.
         # For a stable static-int loop shape, simplify-on should emit smaller

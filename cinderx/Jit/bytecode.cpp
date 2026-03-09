@@ -88,7 +88,9 @@ int BytecodeInstruction::specializedOpcode() const {
     case COMPARE_OP_FLOAT:
     case COMPARE_OP_INT:
     case COMPARE_OP_STR:
+    case LOAD_ATTR_SLOT:
     case LOAD_ATTR_MODULE:
+    case STORE_ATTR_SLOT:
     case STORE_SUBSCR_DICT:
     case UNPACK_SEQUENCE_LIST:
     case UNPACK_SEQUENCE_TUPLE:
@@ -105,6 +107,24 @@ int BytecodeInstruction::specializedOpcode() const {
 int BytecodeInstruction::oparg() const {
   calcOpcodeOffsetAndOparg();
   return extendedOparg_;
+}
+
+uint16_t BytecodeInstruction::cacheU16(int instruction_offset) const {
+#if PY_VERSION_HEX >= 0x030C0000
+  auto idx = opcodeIndex().value() + instruction_offset;
+  return read_u16(&codeUnit(code_)[idx].cache);
+#else
+  JIT_ABORT("cacheU16() not supported before Python 3.12");
+#endif
+}
+
+uint32_t BytecodeInstruction::cacheU32(int instruction_offset) const {
+#if PY_VERSION_HEX >= 0x030C0000
+  auto idx = opcodeIndex().value() + instruction_offset;
+  return read_u32(&codeUnit(code_)[idx].cache);
+#else
+  JIT_ABORT("cacheU32() not supported before Python 3.12");
+#endif
 }
 
 bool BytecodeInstruction::isBranch() const {
