@@ -4,6 +4,7 @@
 
 #include "cinderx/Jit/codegen/arch/detection.h"
 #include "cinderx/Jit/hir/copy_propagation.h"
+#include "cinderx/Jit/deopt.h"
 
 namespace jit::hir {
 
@@ -43,10 +44,29 @@ bool replaceInAllFrameStates(Function& func, Register* boxed, Register* unboxed)
   for (auto& block : func.cfg.blocks) {
     for (auto& instr : block) {
       FrameState* fs = get_frame_state(instr);
-      if (fs == nullptr) {
+      if (fs != nullptr) {
+        changed |= replaceInFrameState(fs, boxed, unboxed);
+      }
+      auto* deopt = instr.asDeoptBase();
+      if (deopt == nullptr) {
         continue;
       }
-      changed |= replaceInFrameState(fs, boxed, unboxed);
+      for (auto& reg_state : deopt->live_regs()) {
+        if (reg_state.reg != boxed) {
+          continue;
+        }
+        reg_state.reg = unboxed;
+        reg_state.value_kind = jit::deoptValueKind(unboxed->type());
+        if (reg_state.value_kind != ValueKind::kObject) {
+          reg_state.ref_kind = RefKind::kUncounted;
+        }
+        changed = true;
+      }
+      deopt->sortLiveRegs();
+      if (deopt->guiltyReg() == boxed) {
+        deopt->setGuiltyReg(unboxed);
+        changed = true;
+      }
     }
   }
   return changed;
@@ -62,7 +82,7 @@ bool collectRemovableUses(
   }
 
   for (Instr* use : use_it->second) {
-    if (!use->IsUseType()) {
+    if (!use->IsUseType() && !use->IsDecref() && !use->IsXDecref()) {
       return false;
     }
     removable_uses.push_back(use);

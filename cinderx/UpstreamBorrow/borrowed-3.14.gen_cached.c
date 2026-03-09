@@ -23,10 +23,6 @@
 #include "internal/pycore_optimizer.h"     // _PyExecutorObject
 #include "internal/pycore_pyatomic_ft_wrappers.h"
 
-#ifndef FT_ATOMIC_LOAD_PTR_CONSUME
-#define FT_ATOMIC_LOAD_PTR_CONSUME(value) FT_ATOMIC_LOAD_PTR_ACQUIRE(value)
-#endif
-
 #ifdef META_PYTHON
 #include "pycore_import.h"        // _PyImport_LoadLazyImport()
 #include "pycore_lazyimport.h"    // _PyLazyImport_New(), _PyLazyImport_GetName()
@@ -2310,6 +2306,11 @@ void Cix_dict_insert_split_value(
     PyObject *key,
     PyObject *value,
     Py_ssize_t ix) {
+#if defined(__clang__)
+  [[clang::always_inline]]
+#elif defined(__GNUC__)
+  [[gnu::always_inline]]
+#endif
   insert_split_value(interp, mp, key, value, ix);
 }
 
@@ -3200,10 +3201,23 @@ take_ownership(PyFrameObject *f, _PyInterpreterFrame *frame)
     }
     assert(!_PyFrame_IsIncomplete(new_frame));
     assert(f->f_back == NULL);
-    // CinderX ARM workaround: deopt can hand us a corrupted `frame->previous`
-    // chain at aggressive auto-jit thresholds. Building f_back through that
-    // chain can segfault in ownership transfer. Skip linking f_back here to
-    // preserve process stability.
+    _PyInterpreterFrame *prev = _PyFrame_GetFirstComplete(frame->previous);
+    if (prev) {
+        assert(prev->owner < FRAME_OWNED_BY_INTERPRETER);
+        PyObject *exc = PyErr_GetRaisedException();
+        /* Link PyFrameObjects.f_back and remove link through _PyInterpreterFrame.previous */
+        PyFrameObject *back = _PyFrame_GetFrameObject(prev);
+        if (back == NULL) {
+            /* Memory error here. */
+            assert(PyErr_ExceptionMatches(PyExc_MemoryError));
+            /* Nothing we can do about it */
+            PyErr_Clear();
+        }
+        else {
+            f->f_back = (PyFrameObject *)Py_NewRef(back);
+        }
+        PyErr_SetRaisedException(exc);
+    }
     if (!_PyObject_GC_IS_TRACKED((PyObject *)f)) {
         _PyObject_GC_TRACK((PyObject *)f);
     }

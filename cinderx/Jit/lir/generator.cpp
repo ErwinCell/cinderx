@@ -3143,19 +3143,11 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         auto reifier = inline_code_to_reifier_.at(code.get());
         Instruction* reifier_reg =
             bbb.appendInstr(OutVReg{}, Instruction::kMove, reifier.get());
-#if PY_VERSION_HEX >= 0x030F0000
         MakeDecref(
             bbb,
             reifier_reg,
             std::optional<destructor>(
                 PyUnstable_JITExecutable_Type.tp_dealloc));
-#else
-        // OSS 3.14 fallback keeps the code object in f_executable.
-        MakeDecref(
-            bbb,
-            reifier_reg,
-            std::optional<destructor>(PyCode_Type.tp_dealloc));
-#endif
 #if PY_VERSION_HEX < 0x030F0000
         // On 3.14, we stored the function object in f_funcobj and incref'd it.
         // Need to decref it here since the frame was not materialized.

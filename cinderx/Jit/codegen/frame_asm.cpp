@@ -531,7 +531,7 @@ void FrameAsm::linkLightWeightFunctionFrame(
 #endif
 
   asmjit::BaseNode* store_f_code_cursor = as_->cursor();
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030F0000
   PyObject* executable = frame_reifier;
 #else
   PyObject* executable = (PyObject*)func_->code.get();
@@ -716,7 +716,7 @@ void FrameAsm::linkLightWeightFunctionFrame(
 #endif
 
   asmjit::BaseNode* store_f_code_cursor = as_->cursor();
-#if PY_VERSION_HEX >= 0x030E0000
+#if PY_VERSION_HEX >= 0x030F0000
   PyObject* executable = frame_reifier;
 #else
   PyObject* executable = (PyObject*)func_->code.get();

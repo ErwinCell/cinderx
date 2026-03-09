@@ -92,7 +92,6 @@ void Compiler::runPasses(
     if (config & PassConfig::kSimplify) {
       runPass(hir::Simplify{}, irfunc, callback);
       runPass(hir::PrimitiveUnboxCSE{}, irfunc, callback);
-      runPass(hir::PrimitiveBoxRemat{}, irfunc, callback);
     }
   };
 
@@ -119,6 +118,7 @@ void Compiler::runPasses(
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
 
   runPass(jit::hir::RefcountInsertion{}, irfunc, callback);
+  runPass(jit::hir::PrimitiveBoxRemat{}, irfunc, callback);
 
   if (getConfig().dump_hir_stats) {
     jit::hir::HIRStats stats;

@@ -36,20 +36,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -Wall -Wextra -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type-mismatch -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
 
-option(ENABLE_STATIC_PYTHON "Enable Static Python features" ON)
-if(NOT ENABLE_STATIC_PYTHON AND ENABLE_ADAPTIVE_STATIC_PYTHON)
-  message(WARNING "ENABLE_STATIC_PYTHON=OFF forces ENABLE_ADAPTIVE_STATIC_PYTHON=OFF")
-  set(ENABLE_ADAPTIVE_STATIC_PYTHON OFF)
-endif()
-
 macro(set_flag VAR)
-  if (DEFINED ${VAR} AND ${${VAR}})
-    set(SHARED_FLAGS "-D${VAR} ${SHARED_FLAGS}")
+  if(DEFINED ${VAR})
+    if(${VAR})
+      set(SHARED_FLAGS "-D${VAR} ${SHARED_FLAGS}")
+    endif()
   endif()
 endmacro()
 
 set_flag(ENABLE_ADAPTIVE_STATIC_PYTHON)
-set_flag(ENABLE_STATIC_PYTHON)
 set_flag(ENABLE_DISASSEMBLER)
 set_flag(ENABLE_ELF_READER)
 set_flag(ENABLE_EVAL_HOOK)
@@ -63,10 +58,6 @@ set_flag(ENABLE_PEP523_HOOK)
 set_flag(ENABLE_PERF_TRAMPOLINE)
 set_flag(ENABLE_SYMBOLIZER)
 set_flag(ENABLE_USDT)
-
-if(ENABLE_STATIC_PYTHON)
-  set(SHARED_FLAGS "-DCINDER_ENABLE_STATIC_PYTHON ${SHARED_FLAGS}")
-endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SHARED_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
@@ -102,36 +93,8 @@ if(ENABLE_LTO)
     set(CMAKE_AR ${LLVM_AR})
     message(STATUS "LTO: Using llvm-ar: ${CMAKE_AR}")
 
-    # llvm-ranlib is preferred when available for LLVM LTO toolchains.
-    find_program(LLVM_RANLIB llvm-ranlib)
-    if(LLVM_RANLIB)
-      set(CMAKE_RANLIB ${LLVM_RANLIB})
-      message(STATUS "LTO: Using llvm-ranlib: ${CMAKE_RANLIB}")
-    endif()
-
     set(LTO_FLAG "-flto")
-    # Prefer lld when available. Some Linux distributions place LLVMgold.so
-    # outside the compiler prefix and GNU ld fails to auto-discover it.
-    find_program(LLD_LINKER NAMES ld.lld lld)
-    if(LLD_LINKER)
-      set(LTO_LINKER_FLAGS "-flto -fuse-ld=lld")
-      message(STATUS "LTO: Using linker: ${LLD_LINKER}")
-    else()
-      # Fallback to GNU ld plugin flow when lld is unavailable.
-      execute_process(
-        COMMAND ${CMAKE_CXX_COMPILER} --print-file-name=LLVMgold.so
-        OUTPUT_VARIABLE LLVMGOLD_PLUGIN
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-      )
-      if(LLVMGOLD_PLUGIN STREQUAL "LLVMgold.so" OR NOT EXISTS "${LLVMGOLD_PLUGIN}")
-        message(FATAL_ERROR
-          "LTO with Clang requires ld.lld or LLVMgold.so plugin. "
-          "Install lld or make LLVMgold.so discoverable."
-        )
-      endif()
-      set(LTO_LINKER_FLAGS "-flto -Wl,--plugin=${LLVMGOLD_PLUGIN}")
-      message(STATUS "LTO: Using LLVMgold plugin: ${LLVMGOLD_PLUGIN}")
-    endif()
+    set(LTO_LINKER_FLAGS "-flto")
   elseif(USING_GCC)
     set(LTO_FLAG "-flto")
     set(LTO_LINKER_FLAGS "-flto -fuse-linker-plugin -ffat-lto-objects")
@@ -208,7 +171,8 @@ set(ASMJIT_STATIC TRUE)
 
 FetchContent_Declare(
   asmjit
-  URL https://codeload.github.com/asmjit/asmjit/tar.gz/cecc73f2979e9704c81a2c2ec79a7475b31c56ac # 2025-May-10
+  GIT_REPOSITORY https://github.com/asmjit/asmjit
+  GIT_TAG cecc73f2979e9704c81a2c2ec79a7475b31c56ac # 2025-May-10
 )
 FetchContent_MakeAvailable(asmjit)
 
@@ -217,7 +181,8 @@ FetchContent_MakeAvailable(asmjit)
 
 FetchContent_Declare(
   fmt
-  URL https://codeload.github.com/fmtlib/fmt/tar.gz/refs/tags/11.2.0 # 2025-May-03
+  GIT_REPOSITORY https://github.com/fmtlib/fmt
+  GIT_TAG 11.2.0 # 2025-May-03
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -226,7 +191,8 @@ FetchContent_MakeAvailable(fmt)
 
 FetchContent_Declare(
   parallel-hashmap
-  URL https://codeload.github.com/greg7mdp/parallel-hashmap/tar.gz/896f1a03e429c45d9fe9638e892fc1da73befadd # 2025-Apr-11
+  GIT_REPOSITORY https://github.com/greg7mdp/parallel-hashmap
+  GIT_TAG 896f1a03e429c45d9fe9638e892fc1da73befadd # 2025-Apr-11
 )
 FetchContent_MakeAvailable(parallel-hashmap)
 
@@ -235,7 +201,8 @@ FetchContent_MakeAvailable(parallel-hashmap)
 
 FetchContent_Declare(
   usdt
-  URL https://codeload.github.com/libbpf/usdt/tar.gz/f4ea2f524efa80d062f4d586d78daafb83dc7d24 # 2025-Apr-24
+  GIT_REPOSITORY https://github.com/libbpf/usdt
+  GIT_TAG f4ea2f524efa80d062f4d586d78daafb83dc7d24 # 2025-Apr-24
 )
 FetchContent_MakeAvailable(usdt)
 

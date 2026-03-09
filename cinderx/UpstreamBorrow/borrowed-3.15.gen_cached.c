@@ -692,23 +692,20 @@ _PyDict_CheckConsistency(PyObject *op, int check_content)
 
 #undef CHECK
 }
-static PyObject *
-new_dict(PyDictKeysObject *keys, PyDictValues *values,
-         Py_ssize_t used, int free_values_on_failure)
+static inline PyObject *
+new_dict_impl(PyDictObject *mp, PyDictKeysObject *keys,
+              PyDictValues *values, Py_ssize_t used,
+              int free_values_on_failure)
 {
     assert(keys != NULL);
-    PyDictObject *mp = _Py_FREELIST_POP(PyDictObject, dicts);
     if (mp == NULL) {
-        mp = PyObject_GC_New(PyDictObject, &PyDict_Type);
-        if (mp == NULL) {
-            dictkeys_decref(keys, false);
-            if (free_values_on_failure) {
-                free_values(values, false);
-            }
-            return NULL;
+        dictkeys_decref(keys, false);
+        if (free_values_on_failure) {
+            free_values(values, false);
         }
+        return NULL;
     }
-    assert(Py_IS_TYPE(mp, &PyDict_Type));
+
     mp->ma_keys = keys;
     mp->ma_values = values;
     mp->ma_used = used;
@@ -716,6 +713,18 @@ new_dict(PyDictKeysObject *keys, PyDictValues *values,
     ASSERT_CONSISTENT(mp);
     _PyObject_GC_TRACK(mp);
     return (PyObject *)mp;
+}
+static PyObject *
+new_dict(PyDictKeysObject *keys, PyDictValues *values,
+         Py_ssize_t used, int free_values_on_failure)
+{
+    PyDictObject *mp = _Py_FREELIST_POP(PyDictObject, dicts);
+    if (mp == NULL) {
+        mp = PyObject_GC_New(PyDictObject, &PyDict_Type);
+    }
+    assert(mp == NULL || Py_IS_TYPE(mp, &PyDict_Type));
+
+    return new_dict_impl(mp, keys, values, used, free_values_on_failure);
 }
 static PyObject *
 new_dict_with_shared_keys(PyDictKeysObject *keys)
@@ -772,7 +781,7 @@ dict_unhashable_type(PyObject *op, PyObject *key)
     }
 
     const char *errmsg;
-    if (PyObject_IsInstance(op, (PyObject*)&PyFrozenDict_Type)) {
+    if (PyFrozenDict_Check(op)) {
         errmsg = "cannot use '%T' as a frozendict key (%S)";
     }
     else {
@@ -1780,6 +1789,11 @@ void Cix_dict_insert_split_value(
     PyObject *key,
     PyObject *value,
     Py_ssize_t ix) {
+#if defined(__clang__)
+  [[clang::always_inline]]
+#elif defined(__GNUC__)
+  [[gnu::always_inline]]
+#endif
   insert_split_value(mp, key, value, ix);
 }
 
@@ -2195,9 +2209,6 @@ error:
 #endif
 #define PyTypeObject_CAST(op)   ((PyTypeObject *)(op))
 #ifndef NDEBUG
-#endif
-#ifdef Py_GIL_DISABLED
-#else
 #endif
 #define SIGNATURE_END_MARKER         ")\n--\n\n"
 #define SIGNATURE_END_MARKER_LENGTH  6

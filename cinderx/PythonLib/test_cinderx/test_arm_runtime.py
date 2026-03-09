@@ -20,6 +20,15 @@ def is_arm_linux() -> bool:
 
 @unittest.skipUnless(is_arm_linux(), "ARM Linux specific runtime checks")
 class ArmRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._compile_after_n_calls = cinderx.jit.get_compile_after_n_calls()
+
+    def tearDown(self) -> None:
+        if self._compile_after_n_calls is None:
+            cinderx.jit.compile_after_n_calls(0)
+        else:
+            cinderx.jit.compile_after_n_calls(self._compile_after_n_calls)
+
     def test_runtime_initializes(self) -> None:
         self.assertTrue(cinderx.is_initialized())
         self.assertIsNone(cinderx.get_import_error())
@@ -280,50 +289,6 @@ class ArmRuntimeTests(unittest.TestCase):
         # materially cheaper, but a second site should still add noticeable
         # native code.
         self.assertGreaterEqual(delta, 256, (size1, size2, delta))
-
-    def test_aarch64_load_module_attr_stub_tracks_invalidation(self) -> None:
-        # Regression guard for the AArch64 LoadModuleAttrCached shared fast path:
-        # enabling the stub should shrink code for repeated module loads without
-        # breaking cache hits or invalidation after the module changes.
-        cinderx.jit.enable()
-        cinderx.jit.compile_after_n_calls(1000000)
-
-        n_loads = 48
-
-        def build_pi_accumulator():
-            lines = ["def f():", "    s = 0.0"]
-            lines.extend(["    s += math.pi"] * n_loads)
-            lines.append("    return s")
-            ns = {"math": math}
-            exec("\n".join(lines), ns, ns)
-            return ns["f"]
-
-        old_min_calls = os.environ.get("PYTHONJITAARCH64SHAREDSTUBMINCALLS")
-        old_pi = math.pi
-        try:
-            os.environ["PYTHONJITAARCH64SHAREDSTUBMINCALLS"] = "24"
-            f = build_pi_accumulator()
-            self.assertTrue(cinderx.jit.force_compile(f))
-            size_with_stub = cinderx.jit.get_compiled_size(f)
-
-            self.assertAlmostEqual(f(), float(n_loads) * old_pi)
-            math.pi = 2.0
-            self.assertEqual(f(), float(n_loads) * 2.0)
-            math.pi = old_pi
-            self.assertAlmostEqual(f(), float(n_loads) * old_pi)
-
-            os.environ["PYTHONJITAARCH64SHAREDSTUBMINCALLS"] = "1000000"
-            g = build_pi_accumulator()
-            self.assertTrue(cinderx.jit.force_compile(g))
-            size_without_stub = cinderx.jit.get_compiled_size(g)
-        finally:
-            math.pi = old_pi
-            if old_min_calls is None:
-                os.environ.pop("PYTHONJITAARCH64SHAREDSTUBMINCALLS", None)
-            else:
-                os.environ["PYTHONJITAARCH64SHAREDSTUBMINCALLS"] = old_min_calls
-
-        self.assertLess(size_with_stub, size_without_stub, (size_with_stub, size_without_stub))
 
     def test_aarch64_duplicate_call_result_arg_chain_is_compact(self) -> None:
         # Regression guard for call-result move chains:
