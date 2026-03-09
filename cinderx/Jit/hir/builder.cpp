@@ -29,6 +29,7 @@
 #include "cinderx/module_state.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -2806,7 +2807,19 @@ void HIRBuilder::emitLoadAttr(
 #endif
 
   if (getConfig().specialized_opcodes) {
-    auto emit_slot_type_version_guard =
+    auto instance_value_min_locals = [&]() -> int {
+#if PY_VERSION_HEX >= 0x030E0000
+      const char* env = std::getenv("PYTHONJITINSTANCEVALUEMINLOCALS");
+      if (env == nullptr) {
+        return 10;
+      }
+      int value = std::atoi(env);
+      return value > 0 ? value : 10;
+#else
+      return 0;
+#endif
+    };
+    auto emit_type_version_guard =
         [&](uint32_t type_version, const char* descr) -> Register* {
       Register* obj_type = temps_.AllocateStack();
       tc.emit<LoadField>(
@@ -2831,6 +2844,46 @@ void HIRBuilder::emitLoadAttr(
       guard->setDescr(descr);
       return obj_type;
     };
+#if PY_VERSION_HEX >= 0x030E0000
+    auto emit_inline_values_valid_guard =
+        [&](Register* obj_type, const char* descr) {
+      Register* basicsize = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          basicsize,
+          obj_type,
+          "tp_basicsize",
+          offsetof(PyTypeObject, tp_basicsize),
+          TCInt64);
+
+      Register* valid_extra = temps_.AllocateStack();
+      tc.emit<LoadConst>(
+          valid_extra,
+          Type::fromCInt(offsetof(PyDictValues, valid), TCInt64));
+
+      Register* valid_offset = temps_.AllocateStack();
+      tc.emit<IntBinaryOp>(
+          valid_offset, BinaryOpKind::kAdd, basicsize, valid_extra);
+
+      Register* valid_addr = temps_.AllocateStack();
+      tc.emit<LoadFieldAddress>(valid_addr, receiver, valid_offset);
+
+      Register* zero_idx = temps_.AllocateStack();
+      tc.emit<LoadConst>(zero_idx, Type::fromCInt(0, TCInt64));
+
+      Register* valid = temps_.AllocateStack();
+      tc.emit<LoadArrayItem>(valid, valid_addr, zero_idx, receiver, 0, TCUInt8);
+
+      Register* zero = temps_.AllocateStack();
+      tc.emit<LoadConst>(zero, Type::fromCUInt(0, TCUInt8));
+
+      Register* valid_nonzero = temps_.AllocateStack();
+      tc.emit<PrimitiveCompare>(
+          valid_nonzero, PrimitiveCompareOp::kNotEqual, valid, zero);
+      auto* guard = tc.emit<Guard>(valid_nonzero, tc.frame);
+      guard->setGuiltyReg(receiver);
+      guard->setDescr(descr);
+    };
+#endif
 
     switch (bc_instr.specializedOpcode()) {
       case LOAD_ATTR_MODULE: {
@@ -2846,7 +2899,7 @@ void HIRBuilder::emitLoadAttr(
           PyErr_Clear();
           field_name = "<unknown>";
         }
-        emit_slot_type_version_guard(bc_instr.cacheU32(2), "LOAD_ATTR_SLOT");
+        emit_type_version_guard(bc_instr.cacheU32(2), "LOAD_ATTR_SLOT");
         Register* result = temps_.AllocateStack();
         tc.emit<LoadField>(
             result, receiver, field_name, bc_instr.cacheU16(4), TOptObject);
@@ -2855,6 +2908,30 @@ void HIRBuilder::emitLoadAttr(
         tc.frame.stack.push(result);
         return;
       }
+#if PY_VERSION_HEX >= 0x030E0000
+      case LOAD_ATTR_INSTANCE_VALUE: {
+        if (code_->co_nlocals < instance_value_min_locals()) {
+          break;
+        }
+        BorrowedRef<PyUnicodeObject> name =
+            PyTuple_GET_ITEM(code_->co_names, name_idx);
+        const char* field_name = PyUnicode_AsUTF8(name);
+        if (field_name == nullptr) {
+          PyErr_Clear();
+          field_name = "<unknown>";
+        }
+        Register* obj_type = emit_type_version_guard(
+            bc_instr.cacheU32(2), "LOAD_ATTR_INSTANCE_VALUE");
+        emit_inline_values_valid_guard(obj_type, "LOAD_ATTR_INSTANCE_VALUE");
+        Register* result = temps_.AllocateStack();
+        tc.emit<LoadField>(
+            result, receiver, field_name, bc_instr.cacheU16(4), TOptObject);
+        CheckField* cf = tc.emit<CheckField>(result, result, name, tc.frame);
+        cf->setGuiltyReg(receiver);
+        tc.frame.stack.push(result);
+        return;
+      }
+#endif
       default:
         break;
     }
@@ -3917,7 +3994,8 @@ void HIRBuilder::emitStoreAttr(
   Register* value = tc.frame.stack.pop();
   if (getConfig().specialized_opcodes &&
       bc_instr.specializedOpcode() == STORE_ATTR_SLOT) {
-    auto emit_slot_type_version_guard = [&](uint32_t type_version, const char* descr) {
+    auto emit_type_version_guard = [&](uint32_t type_version, const char* descr)
+        -> Register* {
       Register* obj_type = temps_.AllocateStack();
       tc.emit<LoadField>(
           obj_type, receiver, "ob_type", offsetof(PyObject, ob_type), TType);
@@ -3939,6 +4017,7 @@ void HIRBuilder::emitStoreAttr(
       auto* guard = tc.emit<Guard>(matches, tc.frame);
       guard->setGuiltyReg(receiver);
       guard->setDescr(descr);
+      return obj_type;
     };
 
     BorrowedRef<PyUnicodeObject> name =
@@ -3948,7 +4027,7 @@ void HIRBuilder::emitStoreAttr(
       PyErr_Clear();
       field_name = "<unknown>";
     }
-    emit_slot_type_version_guard(bc_instr.cacheU32(2), "STORE_ATTR_SLOT");
+    emit_type_version_guard(bc_instr.cacheU32(2), "STORE_ATTR_SLOT");
     Register* previous = temps_.AllocateStack();
     tc.emit<LoadField>(
         previous,
