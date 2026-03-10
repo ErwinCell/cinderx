@@ -29,9 +29,8 @@ class CinderXOSSTest(unittest.TestCase):
 
         machine = platform.machine().lower()
         is_meta_312 = "+meta" in sys.version and sys.version_info[:2] == (3, 12)
-        # Keep this aligned with setup.py: adaptive static python is
-        # enabled for Meta 3.12 only. OSS 3.14 ARM builds keep it disabled.
-        expected = is_meta_312
+        is_314_arm = sys.version_info[:2] == (3, 14) and machine in {"aarch64", "arm64"}
+        expected = is_meta_312 or is_314_arm
         if hasattr(cinderx, "is_static_python_enabled") and not cinderx.is_static_python_enabled():
             expected = False
         self.assertEqual(
@@ -53,9 +52,8 @@ class CinderXOSSTest(unittest.TestCase):
 
         machine = platform.machine().lower()
         is_meta_312 = "+meta" in sys.version and sys.version_info[:2] == (3, 12)
-        # Keep this aligned with setup.py: lightweight frames are currently
-        # enabled for Meta 3.12 only. OSS 3.14 ARM builds keep them disabled.
-        expected = is_meta_312
+        is_314_arm = sys.version_info[:2] == (3, 14) and machine in {"aarch64", "arm64"}
+        expected = is_meta_312 or is_314_arm
         self.assertEqual(
             enabled,
             expected,

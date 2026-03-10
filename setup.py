@@ -146,7 +146,7 @@ def should_enable_adaptive_static_python(
         machine = platform.machine()
     machine = machine.lower()
 
-    return False
+    return py_version == "3.14" and machine in {"aarch64", "arm64"}
 
 
 def should_enable_lightweight_frames(
@@ -161,9 +161,10 @@ def should_enable_lightweight_frames(
         machine = platform.machine()
     machine = machine.lower()
 
-    # Keep existing Meta 3.12 behavior only.
-    # OSS 3.14 ARM builds currently keep lightweight frames disabled.
-    return False
+    # Stage A rollout:
+    # - keep existing meta 3.12 behavior
+    # - enable by default for OSS 3.14 ARM only
+    return py_version == "3.14" and machine in {"aarch64", "arm64"}
 
 
 def is_env_flag_enabled(var: str, default: bool = False) -> bool:
