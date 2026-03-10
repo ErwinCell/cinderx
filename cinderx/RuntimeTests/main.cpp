@@ -12,6 +12,7 @@
 #include "cinderx/Jit/hir/copy_propagation.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
+#include "cinderx/Jit/hir/float_compare_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
@@ -63,6 +64,7 @@ class TestPassRegistry {
     addPass(jit::hir::CopyPropagation::Factory);
     addPass(jit::hir::CleanCFG::Factory);
     addPass(jit::hir::DynamicComparisonElimination::Factory);
+    addPass(jit::hir::FloatCompareElimination::Factory);
     addPass(jit::hir::PhiElimination::Factory);
     addPass(jit::hir::InlineFunctionCalls::Factory);
     addPass(jit::hir::Simplify::Factory);
@@ -220,6 +222,7 @@ int main(int argc, char* argv[]) {
 
   register_test("clean_cfg_test.txt");
   register_test("dynamic_comparison_elimination_test.txt");
+  register_test("float_compare_elimination_test.txt");
   register_test("hir_builder_static_test.txt", RuntimeTest::kStaticCompiler);
   register_test("guard_type_removal_test.txt");
   register_test("inliner_test.txt");

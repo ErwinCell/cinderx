@@ -456,48 +456,91 @@ void TranslateCompare(Environ* env, const Instruction* instr) {
   auto as = env->as;
   const OperandBase* inp0 = instr->getInput(0);
   const OperandBase* inp1 = instr->getInput(1);
+  bool is_fp = inp0->isVecD() && inp1->isVecD();
 
   if (inp1->isImm() || inp1->isMem()) {
     as->cmp(AutoTranslator::getGp(inp0), inp1->getConstantOrAddress());
-  } else if (!inp1->isVecD()) {
+  } else if (!is_fp) {
     as->cmp(AutoTranslator::getGp(inp0), AutoTranslator::getGp(inp1));
   } else {
-    as->comisd(AutoTranslator::getVecD(inp0), AutoTranslator::getVecD(inp1));
+    if (instr->opcode() == Instruction::kLessThanUnsigned ||
+        instr->opcode() == Instruction::kLessThanEqualUnsigned) {
+      as->comisd(AutoTranslator::getVecD(inp1), AutoTranslator::getVecD(inp0));
+    } else {
+      as->comisd(AutoTranslator::getVecD(inp0), AutoTranslator::getVecD(inp1));
+    }
   }
   auto output = AutoTranslator::getGp(instr->output());
-  switch (instr->opcode()) {
-    case Instruction::kEqual:
-      as->sete(output);
-      break;
-    case Instruction::kNotEqual:
-      as->setne(output);
-      break;
-    case Instruction::kGreaterThanSigned:
-      as->setg(output);
-      break;
-    case Instruction::kGreaterThanEqualSigned:
-      as->setge(output);
-      break;
-    case Instruction::kLessThanSigned:
-      as->setl(output);
-      break;
-    case Instruction::kLessThanEqualSigned:
-      as->setle(output);
-      break;
-    case Instruction::kGreaterThanUnsigned:
-      as->seta(output);
-      break;
-    case Instruction::kGreaterThanEqualUnsigned:
-      as->setae(output);
-      break;
-    case Instruction::kLessThanUnsigned:
-      as->setb(output);
-      break;
-    case Instruction::kLessThanEqualUnsigned:
-      as->setbe(output);
-      break;
-    default:
-      JIT_ABORT("bad instruction for TranslateCompare");
+  if (is_fp) {
+    switch (instr->opcode()) {
+      case Instruction::kEqual: {
+        auto unordered = as->newLabel();
+        auto done = as->newLabel();
+        as->jp(unordered);
+        as->sete(output);
+        as->jmp(done);
+        as->bind(unordered);
+        as->mov(output, 0);
+        as->bind(done);
+        break;
+      }
+      case Instruction::kNotEqual: {
+        auto unordered = as->newLabel();
+        auto done = as->newLabel();
+        as->jp(unordered);
+        as->setne(output);
+        as->jmp(done);
+        as->bind(unordered);
+        as->mov(output, 1);
+        as->bind(done);
+        break;
+      }
+      case Instruction::kGreaterThanUnsigned:
+      case Instruction::kLessThanUnsigned:
+        as->seta(output);
+        break;
+      case Instruction::kGreaterThanEqualUnsigned:
+      case Instruction::kLessThanEqualUnsigned:
+        as->setae(output);
+        break;
+      default:
+        JIT_ABORT("bad floating-point instruction for TranslateCompare");
+    }
+  } else {
+    switch (instr->opcode()) {
+      case Instruction::kEqual:
+        as->sete(output);
+        break;
+      case Instruction::kNotEqual:
+        as->setne(output);
+        break;
+      case Instruction::kGreaterThanSigned:
+        as->setg(output);
+        break;
+      case Instruction::kGreaterThanEqualSigned:
+        as->setge(output);
+        break;
+      case Instruction::kLessThanSigned:
+        as->setl(output);
+        break;
+      case Instruction::kLessThanEqualSigned:
+        as->setle(output);
+        break;
+      case Instruction::kGreaterThanUnsigned:
+        as->seta(output);
+        break;
+      case Instruction::kGreaterThanEqualUnsigned:
+        as->setae(output);
+        break;
+      case Instruction::kLessThanUnsigned:
+        as->setb(output);
+        break;
+      case Instruction::kLessThanEqualUnsigned:
+        as->setbe(output);
+        break;
+      default:
+        JIT_ABORT("bad instruction for TranslateCompare");
+    }
   }
   if (instr->output()->dataType() != OperandBase::k8bit) {
     as->movzx(
@@ -508,6 +551,7 @@ void TranslateCompare(Environ* env, const Instruction* instr) {
   auto as = env->as;
   const OperandBase* inp0 = instr->getInput(0);
   const OperandBase* inp1 = instr->getInput(1);
+  bool is_fp = inp0->isVecD() && inp1->isVecD();
 
   if (inp1->isMem()) {
     JIT_CHECK(inp1->sizeInBits() == 64, "Only 64-bit memory supported");
@@ -521,7 +565,7 @@ void TranslateCompare(Environ* env, const Instruction* instr) {
   } else if (inp1->isImm()) {
     auto constant = inp1->getConstantOrAddress();
     arch::cmp_immediate(as, AutoTranslator::getGpWiden(inp0), constant);
-  } else if (!inp1->isVecD()) {
+  } else if (!is_fp) {
     as->cmp(AutoTranslator::getGpWiden(inp0), AutoTranslator::getGpWiden(inp1));
   } else {
     as->fcmp(AutoTranslator::getVecD(inp0), AutoTranslator::getVecD(inp1));
@@ -536,22 +580,28 @@ void TranslateCompare(Environ* env, const Instruction* instr) {
       as->cset(output, arm::CondCode::kNE);
       break;
     case Instruction::kGreaterThanSigned:
+      JIT_CHECK(!is_fp, "Signed floating-point compare is unsupported");
       as->cset(output, arm::CondCode::kGT);
       break;
     case Instruction::kGreaterThanEqualSigned:
+      JIT_CHECK(!is_fp, "Signed floating-point compare is unsupported");
       as->cset(output, arm::CondCode::kGE);
       break;
     case Instruction::kLessThanSigned:
+      JIT_CHECK(!is_fp, "Signed floating-point compare is unsupported");
       as->cset(output, arm::CondCode::kLT);
       break;
     case Instruction::kLessThanEqualSigned:
+      JIT_CHECK(!is_fp, "Signed floating-point compare is unsupported");
       as->cset(output, arm::CondCode::kLE);
       break;
     case Instruction::kGreaterThanUnsigned:
-      as->cset(output, arm::CondCode::kHI);
+      as->cset(
+          output, is_fp ? arm::CondCode::kGT : arm::CondCode::kHI);
       break;
     case Instruction::kGreaterThanEqualUnsigned:
-      as->cset(output, arm::CondCode::kHS);
+      as->cset(
+          output, is_fp ? arm::CondCode::kGE : arm::CondCode::kHS);
       break;
     case Instruction::kLessThanUnsigned:
       as->cset(output, arm::CondCode::kLO);

@@ -57,7 +57,6 @@ namespace jit::hir {
 // functions.
 
 namespace {
-
 struct Env {
   explicit Env(Function& f)
       : func{f},

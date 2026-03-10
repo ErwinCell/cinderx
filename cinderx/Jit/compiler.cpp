@@ -11,6 +11,7 @@
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
+#include "cinderx/Jit/hir/float_compare_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
 #include "cinderx/Jit/hir/hir_stats.h"
 #include "cinderx/Jit/hir/inliner.h"
@@ -118,6 +119,7 @@ void Compiler::runPasses(
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
 
   runPass(jit::hir::RefcountInsertion{}, irfunc, callback);
+  runPass(jit::hir::FloatCompareElimination{}, irfunc, callback);
   runPass(jit::hir::PrimitiveBoxRemat{}, irfunc, callback);
 
   if (getConfig().dump_hir_stats) {
