@@ -70,6 +70,89 @@ class ArmRuntimeTests(unittest.TestCase):
         interp1 = cinderx.jit.count_interpreted_calls(f)
         self.assertEqual(interp1, interp0)
 
+    def test_load_global_mutable_large_int_avoids_repeated_deopts(self) -> None:
+        # Regression guard:
+        # a mutable global int outside the small-int cache should not keep a
+        # GuardIs identity check, otherwise TIMESTAMP += 1 guarantees deopts.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            TIMESTAMP = 1000
+
+            class Square:
+                __slots__ = ("timestamp", "color")
+
+                def __init__(self):
+                    self.timestamp = -1
+                    self.color = 0
+
+            class Board:
+                __slots__ = ("squares", "color")
+
+                def __init__(self):
+                    self.squares = [Square() for _ in range(4)]
+                    self.color = 1
+
+                def useful(self, pos):
+                    global TIMESTAMP
+                    TIMESTAMP += 1
+
+                    square = self.squares[pos]
+                    empties = 0
+                    for neighbour in self.squares:
+                        if neighbour.timestamp != TIMESTAMP:
+                            neighbour.timestamp = TIMESTAMP
+                            empties += 1
+
+                    return empties
+
+            board = Board()
+            assert jit.force_compile(Board.useful)
+            assert jit.is_jit_compiled(Board.useful)
+
+            jit.get_and_clear_runtime_stats()
+            total = 0
+            for i in range(200):
+                total += board.useful(i % 4)
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Board.useful"
+            )
+            print(deopt_count)
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/load_global_mutable_int_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 800, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

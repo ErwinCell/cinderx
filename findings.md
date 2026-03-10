@@ -2959,4 +2959,47 @@ Note:
 - Remote verification on 124.70.162.35 passed:
   - test_slot_type_version_guards_are_deduplicated
   - test_math_sqrt_cdouble_lowers_to_double_sqrt
-  - test_math_sqrt_negative_input_preserves_value_error
+  - test_math_sqrt_negative_input_preserves_value_error## 2026-03-10 Task: LOAD_GLOBAL mutable large int guard fix
+
+### Design
+- Issue: https://github.com/113xiaoji/cinderx/issues/16
+- Actual code location in this branch: cinderx/Jit/hir/builder.cpp, emitLoadGlobal()
+- Chosen fix: keep GuardIs by default, but downgrade mortal exact int globals to GuardType<LongExact>
+- Reason: fixes the TIMESTAMP += 1 deopt pathology without broadly removing identity-based specialization for other globals
+
+### TDD
+- Added remote regression in cinderx/PythonLib/test_cinderx/test_arm_runtime.py:
+  - ArmRuntimeTests.test_load_global_mutable_large_int_avoids_repeated_deopts
+- RED command:
+  - python cinderx/PythonLib/test_cinderx/test_arm_runtime.py ArmRuntimeTests.test_load_global_mutable_large_int_avoids_repeated_deopts -v
+- RED result before fix:
+  - AssertionError: 200 != 0
+
+### Remote verification
+- Entry: ssh root@124.70.162.35
+- Remote workdir: /root/work/cinderx-main
+- Remote venv: /root/venv-cinderx314
+- Remote host could not fetch GitHub during FetchContent.
+- Workaround:
+  - synced fmt-src, parallel-hashmap-src, and usdt-src from local machine into remote _deps
+  - rebuilt incrementally with:
+    - cmake --build scratch/temp.linux-aarch64-cpython-314 --target _cinderx -- -j 1
+  - replaced:
+    - /root/venv-cinderx314/lib/python3.14/site-packages/_cinderx.so
+
+### GREEN
+- Targeted regression command:
+  - python cinderx/PythonLib/test_cinderx/test_arm_runtime.py ArmRuntimeTests.test_load_global_mutable_large_int_avoids_repeated_deopts -v
+- Result:
+  - Ran 1 test ... OK
+
+### HIR evidence
+- Final HIR for Board.useful now shows all LOAD_GLOBAL: TIMESTAMP sites as:
+  - GuardType<LongExact>
+- No GuardIs remains on the TIMESTAMP global in the dumped function.
+
+### Full remote regression
+- Command:
+  - python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+- Result:
+  - Ran 20 tests ... OK

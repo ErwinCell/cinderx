@@ -3714,9 +3714,19 @@ void HIRBuilder::emitLoadGlobal(
     }
     tc.emit<LoadGlobalCached>(
         result, code_, preloader_.builtins(), preloader_.globals(), name_idx);
-    auto guard_is = tc.emit<GuardIs>(result, value, result);
+    DeoptBase* guard = nullptr;
+    // Mortal exact ints are identity-unstable once they move outside the
+    // immortal small-int range. Keep the cached load, but guard on exact type
+    // instead of the compile-time object identity so TIMESTAMP += 1 style
+    // counters can stay on the compiled path.
+    if (PyLong_CheckExact(value) && !(Type::fromObject(value) <= TImmortalLongExact)) {
+      guard = tc.emit<GuardType>(
+          result, Type::fromTypeExact(Py_TYPE(value)), result, tc.frame);
+    } else {
+      guard = tc.emit<GuardIs>(result, value, result);
+    }
     BorrowedRef<> name = PyTuple_GET_ITEM(code_->co_names, name_idx);
-    guard_is->setDescr(fmt::format("LOAD_GLOBAL: {}", PyUnicode_AsUTF8(name)));
+    guard->setDescr(fmt::format("LOAD_GLOBAL: {}", PyUnicode_AsUTF8(name)));
     return true;
   };
 
