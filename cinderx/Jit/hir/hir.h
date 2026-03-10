@@ -1528,6 +1528,8 @@ class INSTR_CLASS(
   BinaryOpKind op_;
 };
 
+DEFINE_SIMPLE_INSTR(DoubleSqrt, (TCDouble), HasOutput, Operands<1>);
+
 class InlineBase {
  public:
   virtual ~InlineBase() = default;
@@ -3377,12 +3379,46 @@ DEFINE_SIMPLE_INSTR(
     Operands<1>,
     DeoptBase);
 
+DEFINE_SIMPLE_INSTR(
+    GuardNonNegativeDouble,
+    (TCDouble),
+    Operands<1>,
+    DeoptBase);
+
 // A guard that verifies that its src is the same object as the target, or
 // deopts if not.
 class INSTR_CLASS(GuardIs, (TOptObject), HasOutput, Operands<1>, DeoptBase) {
  public:
   GuardIs(Register* dst, PyObject* target, Register* src)
       : InstrT(dst, src), target_(target) {}
+
+  PyObject* target() const {
+    return target_;
+  }
+
+ private:
+  PyObject* target_;
+};
+
+class INSTR_CLASS(
+    GuardModuleAttrValue,
+    (TObject),
+    Operands<1>,
+    DeoptBaseWithNameIdx) {
+ public:
+  GuardModuleAttrValue(PyObject* target, Register* receiver, int name_idx)
+      : InstrT(receiver, name_idx), target_(target) {}
+
+  GuardModuleAttrValue(
+      PyObject* target,
+      Register* receiver,
+      int name_idx,
+      const FrameState& frame)
+      : InstrT(receiver, name_idx, frame), target_(target) {}
+
+  Register* receiver() const {
+    return reg();
+  }
 
   PyObject* target() const {
     return target_;

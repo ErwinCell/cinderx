@@ -369,12 +369,15 @@ bool Instr::isReplayable() const {
     case Opcode::kCheckVar:
     case Opcode::kCIntToCBool:
     case Opcode::kDoubleBinaryOp:
+    case Opcode::kDoubleSqrt:
     case Opcode::kFloatCompare:
     case Opcode::kFormatValue:
     case Opcode::kFormatWithSpec:
     case Opcode::kGetSecondOutput:
     case Opcode::kGuard:
     case Opcode::kGuardIs:
+    case Opcode::kGuardModuleAttrValue:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kGuardType:
     case Opcode::kHintType:
     case Opcode::kIndexUnbox:
@@ -713,6 +716,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kDictSubscr:
     case Opcode::kDictUpdate:
     case Opcode::kDoubleBinaryOp:
+    case Opcode::kDoubleSqrt:
     case Opcode::kEagerImportName:
     case Opcode::kFillTypeAttrCache:
     case Opcode::kFillTypeMethodCache:
@@ -832,6 +836,8 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kDeoptPatchpoint:
     case Opcode::kEndInlinedFunction:
     case Opcode::kGuard:
+    case Opcode::kGuardModuleAttrValue:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kHintType:
     case Opcode::kIncref:
     case Opcode::kInitFrameCellVars:

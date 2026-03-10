@@ -182,8 +182,8 @@ set(ASMJIT_STATIC TRUE)
 
 FetchContent_Declare(
   asmjit
-  GIT_REPOSITORY https://github.com/asmjit/asmjit
-  GIT_TAG cecc73f2979e9704c81a2c2ec79a7475b31c56ac # 2025-May-10
+  URL https://codeload.github.com/asmjit/asmjit/tar.gz/cecc73f2979e9704c81a2c2ec79a7475b31c56ac
+  URL_HASH SHA256=8f18fd88c384c206e3a3da4160e6d79320ac3c5c19d956858ec18f9d57ccf02d
 )
 FetchContent_MakeAvailable(asmjit)
 
@@ -192,8 +192,8 @@ FetchContent_MakeAvailable(asmjit)
 
 FetchContent_Declare(
   fmt
-  GIT_REPOSITORY https://github.com/fmtlib/fmt
-  GIT_TAG 11.2.0 # 2025-May-03
+  URL https://codeload.github.com/fmtlib/fmt/tar.gz/11.2.0
+  URL_HASH SHA256=bc23066d87ab3168f27cef3e97d545fa63314f5c79df5ea444d41d56f962c6af
 )
 FetchContent_MakeAvailable(fmt)
 
@@ -202,8 +202,8 @@ FetchContent_MakeAvailable(fmt)
 
 FetchContent_Declare(
   parallel-hashmap
-  GIT_REPOSITORY https://github.com/greg7mdp/parallel-hashmap
-  GIT_TAG 896f1a03e429c45d9fe9638e892fc1da73befadd # 2025-Apr-11
+  URL https://codeload.github.com/greg7mdp/parallel-hashmap/tar.gz/896f1a03e429c45d9fe9638e892fc1da73befadd
+  URL_HASH SHA256=9a44071db1760ca18b56815ba719b61651d4b32efbd9f13e8e41fe9a5084f65d
 )
 FetchContent_MakeAvailable(parallel-hashmap)
 
@@ -212,8 +212,8 @@ FetchContent_MakeAvailable(parallel-hashmap)
 
 FetchContent_Declare(
   usdt
-  GIT_REPOSITORY https://github.com/libbpf/usdt
-  GIT_TAG f4ea2f524efa80d062f4d586d78daafb83dc7d24 # 2025-Apr-24
+  URL https://codeload.github.com/libbpf/usdt/tar.gz/f4ea2f524efa80d062f4d586d78daafb83dc7d24
+  URL_HASH SHA256=69467234c3c009952fea99dd057e5200160603c7e3e04ecb74458e29746e5b95
 )
 FetchContent_MakeAvailable(usdt)
 
@@ -226,6 +226,21 @@ file(COPY ${usdt_SOURCE_DIR}/usdt.h DESTINATION ${USDT_DIR})
 # zlib
 
 find_package(ZLIB)
+if(NOT ZLIB_FOUND)
+  message(STATUS "ZLIB not found locally; fetching zlib from GitHub archive")
+  set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    zlib
+    URL https://codeload.github.com/madler/zlib/tar.gz/v1.3.1
+    URL_HASH SHA256=17e88863f3600672ab49182f217281b6fc4d3c762bde361935e436a95214d05c
+  )
+  FetchContent_MakeAvailable(zlib)
+  if(TARGET zlibstatic AND NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlibstatic)
+  elseif(TARGET zlib AND NOT TARGET ZLIB::ZLIB)
+    add_library(ZLIB::ZLIB ALIAS zlib)
+  endif()
+endif()
 
 ##############################################################################
 # Build cinderx

@@ -20,6 +20,8 @@
 
 #include <fmt/ostream.h>
 
+#include <cstring>
+
 namespace jit::hir {
 
 // This file contains the Simplify pass, which is a collection of
@@ -231,6 +233,25 @@ struct Env {
     return emitRawInstr<Phi>(output, args);
   }
 };
+
+bool isRegisterUsed(const Function& func, const Register* reg) {
+  for (const auto& block : func.cfg.blocks) {
+    for (const auto& instr : block) {
+      bool found = false;
+      instr.visitUses([&](Register* use) {
+        if (use == reg) {
+          found = true;
+          return false;
+        }
+        return true;
+      });
+      if (found) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 Register* simplifyCheck(const CheckBase* instr) {
   // These all check their input for null.
@@ -1683,6 +1704,137 @@ static bool isBuiltin(Register* callable, const char* name) {
   return false;
 }
 
+static BorrowedRef<PyDictObject> getKnownModuleDict(BorrowedRef<> obj) {
+  if (PyModule_Check(obj)) {
+    return reinterpret_cast<PyModuleObject*>(obj.get())->md_dict;
+  }
+  if (Ci_StrictModule_Check(obj)) {
+    return reinterpret_cast<Ci_StrictModuleObject*>(obj.get())->globals;
+  }
+  return nullptr;
+}
+
+static PyMethodDef* findModuleMethod(PyModuleDef* def, const char* name) {
+  if (def == nullptr || def->m_methods == nullptr) {
+    return nullptr;
+  }
+  for (PyMethodDef* method = def->m_methods; method->ml_name != nullptr;
+       method++) {
+    if (std::strcmp(method->ml_name, name) == 0) {
+      return method;
+    }
+  }
+  return nullptr;
+}
+
+static PyObject* getKnownBuiltinMathSqrt(const LoadModuleAttrCached* load) {
+  Register* receiver = load->GetOperand(0);
+  Type receiver_type = receiver->type();
+  if (!receiver_type.hasObjectSpec()) {
+    return nullptr;
+  }
+
+  BorrowedRef<> module_obj = receiver_type.objectSpec();
+  if (!PyModule_Check(module_obj)) {
+    return nullptr;
+  }
+
+  PyModuleDef* def = PyModule_GetDef(module_obj);
+  if (def == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  if (std::strcmp(def->m_name, "math") != 0) {
+    return nullptr;
+  }
+
+  if (PyUnicode_CompareWithASCIIString(load->name(), "sqrt") != 0) {
+    PyErr_Clear();
+    return nullptr;
+  }
+
+  PyMethodDef* sqrt_def = findModuleMethod(def, "sqrt");
+  if (sqrt_def == nullptr) {
+    return nullptr;
+  }
+
+  BorrowedRef<PyDictObject> dict = getKnownModuleDict(module_obj);
+  if (dict == nullptr) {
+    return nullptr;
+  }
+
+  BorrowedRef<> value = PyDict_GetItemWithError(dict, load->name());
+  if (value == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  if (!PyCFunction_Check(value)) {
+    return nullptr;
+  }
+
+  auto* func = reinterpret_cast<PyCFunctionObject*>(value.get());
+  if (func->m_ml != sqrt_def) {
+    return nullptr;
+  }
+
+  return value;
+}
+
+static Register* simplifyVectorCallMathSqrt(
+    Env& env,
+    const VectorCall* instr) {
+  if (instr->numArgs() != 1) {
+    return nullptr;
+  }
+
+  Register* target = modelReg(instr->func());
+  if (!target->instr()->IsLoadModuleAttrCached()) {
+    return nullptr;
+  }
+
+  auto* load = static_cast<const LoadModuleAttrCached*>(target->instr());
+  PyObject* expected = getKnownBuiltinMathSqrt(load);
+  if (expected == nullptr) {
+    return nullptr;
+  }
+
+  Register* arg = instr->arg(0);
+  Register* double_arg = nullptr;
+  if (arg->isA(TCDouble)) {
+    double_arg = arg;
+  } else if (arg->instr()->IsPrimitiveBox()) {
+    auto* box = static_cast<const PrimitiveBox*>(arg->instr());
+    if (box->value()->type() <= TCDouble) {
+      double_arg = box->value();
+    }
+  }
+
+  if (double_arg == nullptr) {
+    return nullptr;
+  }
+
+  env.emit<GuardModuleAttrValue>(
+      expected, load->GetOperand(0), load->name_idx(), *instr->frameState());
+  env.emit<GuardNonNegativeDouble>(double_arg, *instr->frameState());
+  Register* result = env.emit<DoubleSqrt>(double_arg);
+  return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
+}
+
+static Register* simplifyLoadModuleAttrCachedMathSqrt(
+    Env& env,
+    const LoadModuleAttrCached* instr) {
+  if (isRegisterUsed(env.func, instr->output())) {
+    return nullptr;
+  }
+
+  PyObject* expected = getKnownBuiltinMathSqrt(instr);
+  if (expected == nullptr) {
+    return nullptr;
+  }
+
+  return env.emit<LoadConst>(Type::fromObject(env.func.env.addReference(expected)));
+}
+
 // This is inspired by _PyEval_EvalCodeWithName in 3.8's Python/ceval.c
 // We have a vector of Register* (resolved_args) that gets populated with
 // already-provided arguments from call instructions alongside the function's
@@ -1945,6 +2097,9 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
   if (instr->flags() & CallFlags::KwArgs) {
     return nullptr;
   }
+  if (Register* result = simplifyVectorCallMathSqrt(env, instr)) {
+    return result;
+  }
 
   Register* target = instr->GetOperand(0);
   Type target_type = target->type();
@@ -2124,6 +2279,9 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 #endif
     case Opcode::kLoadField:
       return simplifyLoadField(env, static_cast<const LoadField*>(instr));
+    case Opcode::kLoadModuleAttrCached:
+      return simplifyLoadModuleAttrCachedMathSqrt(
+          env, static_cast<const LoadModuleAttrCached*>(instr));
     case Opcode::kLoadTupleItem:
       return simplifyLoadTupleItem(
           env, static_cast<const LoadTupleItem*>(instr));

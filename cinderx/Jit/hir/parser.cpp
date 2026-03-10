@@ -572,6 +572,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<FloatBinaryOp>(dst, op, left, right);
       break;
     }
+    case Opcode::kDoubleSqrt: {
+      auto operand = ParseRegister();
+      NEW_INSTR(DoubleSqrt, dst, operand);
+      break;
+    }
     case Opcode::kCompare: {
       expect("<");
       CompareOp op = ParseCompareOpName(GetNextToken());
@@ -788,6 +793,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<Guard>(operand);
       break;
     }
+    case Opcode::kGuardNonNegativeDouble: {
+      auto operand = ParseRegister();
+      instruction = newInstr<GuardNonNegativeDouble>(operand);
+      break;
+    }
     case Opcode::kGuardType: {
       expect("<");
       Type ty = parseType(GetNextToken());
@@ -807,6 +817,14 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       expect(">");
       auto operand = ParseRegister();
       NEW_INSTR(GuardIs, dst, Py_None, operand);
+      break;
+    }
+    case Opcode::kGuardModuleAttrValue: {
+      expect("<");
+      int idx = GetNextNameIdx();
+      expect(">");
+      auto receiver = ParseRegister();
+      instruction = newInstr<GuardModuleAttrValue>(Py_None, receiver, idx);
       break;
     }
     case Opcode::kIsTruthy: {

@@ -262,6 +262,7 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
     case Opcode::kGetLength:
     case Opcode::kGetTuple:
     case Opcode::kGuard:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kIncref:
     case Opcode::kInitialYield:
     case Opcode::kInvokeIterNext:
@@ -515,6 +516,8 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
       const auto& bin_op = static_cast<const DoubleBinaryOp&>(instr);
       return std::string{GetBinaryOpName(bin_op.op())};
     }
+    case Opcode::kDoubleSqrt:
+      return "";
     case Opcode::kLoadArg: {
       const auto& load = static_cast<const LoadArg&>(instr);
       auto varname = format_varname(func, load, load.arg_idx());
@@ -685,6 +688,10 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
     case Opcode::kGuardIs: {
       const auto& gs = static_cast<const GuardIs&>(instr);
       return fmt::format("{}", getStablePointer(gs.target()));
+    }
+    case Opcode::kGuardModuleAttrValue: {
+      const auto& guard = static_cast<const GuardModuleAttrValue&>(instr);
+      return format_name(func, guard, guard.name_idx());
     }
     case Opcode::kGuardType: {
       const auto& gs = static_cast<const GuardType&>(instr);

@@ -127,6 +127,13 @@ int bytes_from_cint_type(Type type) {
   // NOTREACHED
 }
 
+BorrowedRef<PyDictObject> getKnownModuleDict(BorrowedRef<> obj) {
+  if (PyModule_Check(obj)) {
+    return reinterpret_cast<PyModuleObject*>(obj.get())->md_dict;
+  }
+  return nullptr;
+}
+
 #define FOREACH_FAST_BUILTIN(V) \
   V(Long)                       \
   V(List)                       \
@@ -959,6 +966,11 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         }
 
         bbb.appendInstr(instr->output(), op, instr->left(), instr->right());
+        break;
+      }
+      case Opcode::kDoubleSqrt: {
+        auto instr = static_cast<const DoubleSqrt*>(&i);
+        bbb.appendInstr(instr->output(), Instruction::kFsqrt, instr->GetOperand(0));
         break;
       }
       case Opcode::kPrimitiveCompare: {
@@ -1867,15 +1879,36 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       case Opcode::kCheckNeg:
       case Opcode::kCheckVar:
       case Opcode::kGuard:
+      case Opcode::kGuardNonNegativeDouble:
       case Opcode::kGuardIs: {
         const auto& instr = static_cast<const DeoptBase&>(i);
         auto kind = InstrGuardKind::kNotZero;
-        if (instr.IsCheckNeg()) {
+        if (instr.IsCheckNeg() || instr.IsGuardNonNegativeDouble()) {
           kind = InstrGuardKind::kNotNegative;
         } else if (instr.IsGuardIs()) {
           kind = InstrGuardKind::kIs;
         }
         appendGuard(bbb, kind, instr, bbb.getDefInstr(instr.GetOperand(0)));
+        break;
+      }
+      case Opcode::kGuardModuleAttrValue: {
+        auto instr = static_cast<const GuardModuleAttrValue*>(&i);
+        Type receiver_type = instr->receiver()->type();
+        JIT_CHECK(
+            receiver_type.hasObjectSpec(),
+            "GuardModuleAttrValue requires a constant module receiver");
+        BorrowedRef<> module = receiver_type.objectSpec();
+        BorrowedRef<PyDictObject> dict = getKnownModuleDict(module);
+        JIT_CHECK(
+            dict != nullptr,
+            "GuardModuleAttrValue requires a builtin module receiver");
+        BorrowedRef<PyUnicodeObject> name{instr->name()};
+        auto cache =
+            cinderx::getModuleState()->cacheManager()->getGlobalCache(
+                dict, dict, name);
+        Instruction* value = bbb.appendInstr(
+            OutVReg{OperandBase::k64bit}, Instruction::kMove, MemImm{cache});
+        appendGuard(bbb, InstrGuardKind::kIs, *instr, value);
         break;
       }
       case Opcode::kGuardType: {
@@ -3523,6 +3556,8 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         case Opcode::kDeoptPatchpoint:
         case Opcode::kGuard:
         case Opcode::kGuardIs:
+        case Opcode::kGuardModuleAttrValue:
+        case Opcode::kGuardNonNegativeDouble:
         case Opcode::kGuardType:
         case Opcode::kInvokeStaticFunction:
         case Opcode::kIsInstance:

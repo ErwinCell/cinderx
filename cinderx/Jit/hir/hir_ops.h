@@ -51,6 +51,7 @@ namespace jit::hir {
   V(DictSubscr)                        \
   V(DictUpdate)                        \
   V(DoubleBinaryOp)                    \
+  V(DoubleSqrt)                        \
   V(EagerImportName)                   \
   V(EndInlinedFunction)                \
   V(FillTypeAttrCache)                 \
@@ -67,6 +68,8 @@ namespace jit::hir {
   V(GetTuple)                          \
   V(Guard)                             \
   V(GuardIs)                           \
+  V(GuardModuleAttrValue)              \
+  V(GuardNonNegativeDouble)            \
   V(GuardType)                         \
   V(HintType)                          \
   V(ImportFrom)                        \

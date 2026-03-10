@@ -39,6 +39,7 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kDeopt:
     case Opcode::kDeoptPatchpoint:
     case Opcode::kDoubleBinaryOp:
+    case Opcode::kDoubleSqrt:
     case Opcode::kFloatCompare:
     case Opcode::kGetSecondOutput:
     case Opcode::kHintType:
@@ -98,6 +99,8 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kCheckSequenceBounds:
     case Opcode::kCheckVar:
     case Opcode::kGuard:
+    case Opcode::kGuardModuleAttrValue:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kGuardType:
       return commonEffects(inst, AEmpty);
 
@@ -365,6 +368,8 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kCIntToCBool:
     case Opcode::kDeopt:
     case Opcode::kGuard:
+    case Opcode::kGuardModuleAttrValue:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kGuardType:
     case Opcode::kRaise:
     case Opcode::kRaiseAwaitableError:
@@ -389,6 +394,7 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kCondBranchIterNotDone:
     case Opcode::kDeoptPatchpoint:
     case Opcode::kDoubleBinaryOp:
+    case Opcode::kDoubleSqrt:
     case Opcode::kEndInlinedFunction:
     case Opcode::kFloatCompare:
     case Opcode::kGetSecondOutput:

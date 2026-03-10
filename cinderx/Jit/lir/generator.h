@@ -84,6 +84,11 @@ class LIRGenerator {
       const auto& guard = static_cast<const hir::GuardIs&>(hir_instr);
       env_->code_rt->addReference(guard.target());
       instr->addOperands(MemImm{guard.target()});
+    } else if (hir_instr.IsGuardModuleAttrValue()) {
+      const auto& guard =
+          static_cast<const hir::GuardModuleAttrValue&>(hir_instr);
+      env_->code_rt->addReference(guard.target());
+      instr->addOperands(MemImm{guard.target()});
     } else if (hir_instr.IsGuardType()) {
       const auto& guard = static_cast<const hir::GuardType&>(hir_instr);
       // TASK(T101999851): Handle non-Exact types

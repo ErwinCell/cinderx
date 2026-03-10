@@ -678,6 +678,112 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
             self.assertEqual(float(lines[-1]), 48.0, proc.stdout)
 
+    def test_math_sqrt_cdouble_lowers_to_double_sqrt(self) -> None:
+        # Regression guard:
+        # builtin math.sqrt on a CDouble input should lower to DoubleSqrt and
+        # eliminate the module attr load / VectorCall chain from final HIR.
+        code = textwrap.dedent(
+            """
+            import math
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def euclidean_distance(ax, ay, bx, by):
+                dx = ax - bx
+                dy = ay - by
+                return math.sqrt(dx * dx + dy * dy)
+
+            for _ in range(10000):
+                euclidean_distance(1.0, 2.0, 4.0, 6.0)
+
+            assert jit.force_compile(euclidean_distance)
+            counts = cinderjit.get_function_hir_opcode_counts(euclidean_distance)
+            print(counts.get("DoubleSqrt", 0))
+            print(counts.get("VectorCall", 0))
+            print(counts.get("LoadModuleAttrCached", 0))
+            print(euclidean_distance(1.0, 2.0, 4.0, 6.0))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/math_sqrt_double_sqrt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(float(lines[-1]), 5.0, proc.stdout)
+
+    def test_math_sqrt_negative_input_preserves_value_error(self) -> None:
+        # Regression guard:
+        # the native sqrt fast path must deopt/slow-path on negative doubles so
+        # Python still raises ValueError instead of returning NaN.
+        code = textwrap.dedent(
+            """
+            import math
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(x):
+                return math.sqrt(x)
+
+            for _ in range(10000):
+                f(9.0)
+
+            assert jit.force_compile(f)
+
+            try:
+                f(-1.0)
+            except ValueError:
+                print("valueerror")
+            else:
+                print("noerror")
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/math_sqrt_negative_valueerror.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            self.assertEqual(
+                proc.stdout.strip().splitlines()[-1], "valueerror", proc.stdout
+            )
+
     def test_primitive_unbox_cse_for_float_add_self(self) -> None:
         # Regression guard:
         # for g(x) = x + x (float path), final HIR should keep a single

@@ -290,6 +290,9 @@ Type outputType(
     case Opcode::kDoubleBinaryOp: {
       return TCDouble;
     }
+    case Opcode::kDoubleSqrt: {
+      return TCDouble;
+    }
     case Opcode::kPrimitiveCompare:
       return TCBool;
     case Opcode::kPrimitiveUnaryOp:
@@ -521,6 +524,8 @@ Type outputType(
     case Opcode::kDeoptPatchpoint:
     case Opcode::kEndInlinedFunction:
     case Opcode::kGuard:
+    case Opcode::kGuardModuleAttrValue:
+    case Opcode::kGuardNonNegativeDouble:
     case Opcode::kHintType:
     case Opcode::kIncref:
     case Opcode::kInitFrameCellVars:

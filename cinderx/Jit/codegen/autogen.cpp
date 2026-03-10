@@ -159,6 +159,8 @@ void AutoTranslator::translateInstr(Environ* env, const Instruction* instr)
 
 namespace {
 
+static const double kDoubleZero = 0.0;
+
 void fillLiveValueLocations(
     CodeRuntime* code_runtime,
     std::size_t deopt_idx,
@@ -192,10 +194,23 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
   bool is_double = false;
   if (kind != kAlwaysFail) {
     if (instr->getInput(2)->dataType() == jit::lir::OperandBase::kDouble) {
-      JIT_CHECK(kind == kNotZero, "Only NotZero is supported for double");
       auto vecd_reg = AutoTranslator::getVecD(instr->getInput(2));
-      as->ptest(vecd_reg, vecd_reg);
-      as->jz(deopt_label);
+      switch (kind) {
+        case kNotZero:
+          as->ptest(vecd_reg, vecd_reg);
+          as->jz(deopt_label);
+          break;
+        case kNotNegative: {
+          auto skip = as->newLabel();
+          as->ucomisd(vecd_reg, x86::ptr(reinterpret_cast<uint64_t>(&kDoubleZero)));
+          as->jp(skip);
+          as->jb(deopt_label);
+          as->bind(skip);
+          break;
+        }
+        default:
+          JIT_ABORT("Unsupported guard kind {} for double", kind);
+      }
       is_double = true;
     } else {
       reg = AutoTranslator::getGp(instr->getInput(2));
@@ -285,6 +300,12 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
     as->b(target);
     as->bind(skip);
   };
+  auto emit_b_mi_far = [&](asmjit::Label target) {
+    auto skip = as->newLabel();
+    as->b_pl(skip);
+    as->b(target);
+    as->bind(skip);
+  };
 
   arch::Gp reg = arch::reg_scratch_0;
   bool is_double = false;
@@ -292,10 +313,19 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
   size_t sign_bit = 0;
   if (kind != kAlwaysFail) {
     if (instr->getInput(2)->dataType() == jit::lir::OperandBase::kDouble) {
-      JIT_CHECK(kind == kNotZero, "Only NotZero is supported for double")
       auto vecd_reg = AutoTranslator::getVecD(instr->getInput(2));
-      as->fmov(reg, vecd_reg);
-      emit_cbz_far(reg, deopt_label);
+      switch (kind) {
+        case kNotZero:
+          as->fmov(reg, vecd_reg);
+          emit_cbz_far(reg, deopt_label);
+          break;
+        case kNotNegative:
+          as->fcmp(vecd_reg, 0.0);
+          emit_b_mi_far(deopt_label);
+          break;
+        default:
+          JIT_ABORT("Unsupported guard kind {} for double", kind);
+      }
       is_double = true;
     } else {
       auto data_type = instr->getInput(2)->dataType();
@@ -1555,6 +1585,10 @@ END_RULES
 BEGIN_RULES(Instruction::kFdiv)
   GEN("Xxx", ASM(movsd, OP(0), OP(1)), ASM(divsd, OP(0), OP(2)))
   GEN("xx", ASM(divsd, OP(0), OP(1)))
+END_RULES
+
+BEGIN_RULES(Instruction::kFsqrt)
+  GEN("Xx", ASM(sqrtsd, OP(0), OP(1)))
 END_RULES
 
 BEGIN_RULES(Instruction::kPush)
@@ -2881,6 +2915,10 @@ END_RULES
 BEGIN_RULES(Instruction::kFdiv)
   GEN("Xxx", ASM(fdiv, OP(0), OP(1), OP(2)))
   GEN("xx", ASM(fdiv, OP(0), OP(0), OP(1)))
+END_RULES
+
+BEGIN_RULES(Instruction::kFsqrt)
+  GEN("Xx", ASM(fsqrt, OP(0), OP(1)))
 END_RULES
 
 BEGIN_RULES(Instruction::kPush)

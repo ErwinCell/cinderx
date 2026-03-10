@@ -539,12 +539,14 @@ class BuildExt(build_ext):
         for name, value in options.items():
             cmake_args.append(f"-D{name}={value}")
 
+        build_jobs = int(os.environ.get("CINDERX_BUILD_JOBS", os.cpu_count() or 1))
+
         build_args = [
             "--config",
             build_type,
             "--",
             "-j",
-            str(os.cpu_count() or 1),
+            str(build_jobs),
         ]
 
         # pyre-ignore[16]: No pyre types for build_ext.
@@ -552,6 +554,9 @@ class BuildExt(build_ext):
         self.spawn(["cmake", "--build", build_dir] + build_args)
 
     def _find_python(self) -> str:
+        override = os.environ.get("Python_ROOT_DIR")
+        if override:
+            return override
         # Normally this would use "data", but that goes to a temporary build directory
         # under uv.  Work off of the include directory instead.
         include_dir = sysconfig.get_path("include")
