@@ -1609,7 +1609,9 @@ int _cinderx_exec_impl(PyObject* m) {
   if (_Ci_CreateStaticModule() < 0) {
     return -1;
   }
-
+  if (Ci_InitFrameEvalFunc() < 0) {
+    return -1;
+  }
   return 0;
 }
 
