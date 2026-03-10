@@ -395,6 +395,7 @@ bool Instr::isReplayable() const {
     case Opcode::kLoadFieldAddress:
     case Opcode::kLoadFunctionIndirect:
     case Opcode::kLoadGlobalCached:
+    case Opcode::kListSlice:
     case Opcode::kLoadSplitDictItem:
     case Opcode::kLoadTupleItem:
     case Opcode::kLoadTypeAttrCacheEntryType:
@@ -744,6 +745,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kIsTruthy:
     case Opcode::kListAppend:
     case Opcode::kListExtend:
+    case Opcode::kListSlice:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:
     case Opcode::kLoadAttr:

@@ -732,6 +732,13 @@ DEFINE_SIMPLE_INSTR(
     Operands<2>,
     DeoptBase);
 
+DEFINE_SIMPLE_INSTR(
+    ListSlice,
+    (TListExact, TObject, TObject),
+    HasOutput,
+    Operands<3>,
+    DeoptBase);
+
 // Gets a tuple representation from a sequence.
 DEFINE_SIMPLE_INSTR(GetTuple, (TObject), HasOutput, Operands<1>, DeoptBase);
 

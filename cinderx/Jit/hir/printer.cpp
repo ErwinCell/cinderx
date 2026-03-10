@@ -651,6 +651,8 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
       const auto& build_slice = static_cast<const BuildSlice&>(instr);
       return fmt::format("{}", build_slice.NumOperands());
     }
+    case Opcode::kListSlice:
+      return "";
     case Opcode::kLoadTypeAttrCacheEntryType: {
       const auto& i = static_cast<const LoadTypeAttrCacheEntryType&>(instr);
       return fmt::format("{}", i.cache_id());

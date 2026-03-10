@@ -93,6 +93,7 @@ namespace jit::hir {
   V(IsTruthy)                          \
   V(ListAppend)                        \
   V(ListExtend)                        \
+  V(ListSlice)                         \
   V(LoadArrayItem)                     \
   V(LoadFieldAddress)                  \
   V(LoadArg)                           \

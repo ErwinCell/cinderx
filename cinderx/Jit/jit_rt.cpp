@@ -897,6 +897,29 @@ PyObject* JITRT_LoadGlobalsDict(PyThreadState* tstate) {
   return rtfs.globals();
 }
 
+PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop) {
+  JIT_DCHECK(PyList_CheckExact(list), "Expected exact list");
+  JIT_DCHECK(
+      start == Py_None || PyLong_CheckExact(start),
+      "Expected exact int or None for slice start");
+  JIT_DCHECK(
+      stop == Py_None || PyLong_CheckExact(stop),
+      "Expected exact int or None for slice stop");
+
+  Py_ssize_t start_index = 0;
+  Py_ssize_t stop_index = PyList_GET_SIZE(list);
+
+  if (start != Py_None && !_PyEval_SliceIndexNotNone(start, &start_index)) {
+    return nullptr;
+  }
+  if (stop != Py_None && !_PyEval_SliceIndexNotNone(stop, &stop_index)) {
+    return nullptr;
+  }
+
+  PySlice_AdjustIndices(PyList_GET_SIZE(list), &start_index, &stop_index, 1);
+  return PyList_GetSlice(list, start_index, stop_index);
+}
+
 PyObject* JITRT_LoadFunctionIndirect(PyObject** func, PyObject* descr) {
   PyObject* res = *func;
   if (!res) {

@@ -759,6 +759,19 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
     if (lhs->isA(TDictExact)) {
       return env.emit<DictSubscr>(lhs, rhs, *instr->frameState());
     }
+    if (lhs->isA(TListExact) && rhs->instr()->IsBuildSlice()) {
+      auto* build_slice = static_cast<const BuildSlice*>(rhs->instr());
+      Register* start = build_slice->start();
+      Register* stop = build_slice->stop();
+      bool supported_start = start->isA(TNoneType) || start->isA(TLongExact);
+      bool supported_stop = stop->isA(TNoneType) || stop->isA(TLongExact);
+      if (build_slice->NumOperands() == 2 && supported_start && supported_stop) {
+        env.emit<UseType>(lhs, TListExact);
+        env.emit<UseType>(start, start->type());
+        env.emit<UseType>(stop, stop->type());
+        return env.emit<ListSlice>(lhs, start, stop, *instr->frameState());
+      }
+    }
     if (!rhs->isA(TLongExact)) {
       return nullptr;
     }

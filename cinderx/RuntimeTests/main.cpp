@@ -16,6 +16,7 @@
 #include "cinderx/Jit/hir/guard_removal.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
+#include "cinderx/Jit/hir/list_slice_cleanup.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
@@ -67,6 +68,7 @@ class TestPassRegistry {
     addPass(jit::hir::FloatCompareElimination::Factory);
     addPass(jit::hir::PhiElimination::Factory);
     addPass(jit::hir::InlineFunctionCalls::Factory);
+    addPass(jit::hir::ListSliceCleanup::Factory);
     addPass(jit::hir::Simplify::Factory);
     addPass(jit::hir::DeadCodeElimination::Factory);
     addPass(jit::hir::GuardTypeRemoval::Factory);
@@ -228,6 +230,7 @@ int main(int argc, char* argv[]) {
   register_test("inliner_test.txt");
   register_test("inliner_elimination_test.txt");
   register_test("inliner_static_test.txt", RuntimeTest::kStaticCompiler);
+  register_test("list_slice_cleanup_test.txt");
   register_test(
       "inliner_elimination_static_test.txt", RuntimeTest::kStaticCompiler);
   register_test("phi_elimination_test.txt");

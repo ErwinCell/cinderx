@@ -2606,6 +2606,16 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             instr->GetOperand(1));
         break;
       }
+      case Opcode::kListSlice: {
+        auto instr = static_cast<const ListSlice*>(&i);
+        bbb.appendCallInstruction(
+            instr->output(),
+            JITRT_ListSlice,
+            instr->GetOperand(0),
+            instr->GetOperand(1),
+            instr->GetOperand(2));
+        break;
+      }
       case Opcode::kInPlaceOp: {
         auto instr = static_cast<const InPlaceOp*>(&i);
 

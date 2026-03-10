@@ -372,6 +372,8 @@ Type outputType(
     // directly.
     case Opcode::kListExtend:
       return TNoneType;
+    case Opcode::kListSlice:
+      return TMortalListExact;
 
     case Opcode::kListAppend:
     case Opcode::kMergeSetUnpack:

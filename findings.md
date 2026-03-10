@@ -3003,3 +3003,107 @@ Note:
   - python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
 - Result:
   - Ran 20 tests ... OK
+
+## 2026-03-10 Issue 17 评估（远端闭环，未实施代码修改）
+- 远端入口：`root@124.70.162.35`
+- issue：`https://github.com/113xiaoji/cinderx/issues/17`
+- 结论：issue 中提议的 `LoadGlobalCached + GuardIs` 去重在所给 case 上不安全，当前不应直接实现。
+
+### 本地语义审查
+- `LoadGlobalCached` 读取 `AGlobal`，不是纯常量。
+- `GuardIs` 钉住对象身份，但不能跨“可能任意执行”的指令省略。
+- `VectorCall` / `BinaryOp` 等在 HIR 里被标为 `hasArbitraryExecution = true`。
+
+### 远端最小复现
+- 复现脚本形状：
+  - `a = func_g(x)`
+  - `b = func_g(y)`
+  - `return a + b`
+- 远端 final HIR 结果：
+  - `LoadGlobalCached: 2`
+  - `GuardIs: 2`
+  - `VectorCall: 2`
+- 这说明重复加载存在，但两次加载之间隔着函数调用 barrier。
+
+### 反例证明（关键）
+- 远端构造：
+  - 第一次调用 `func_g(x)` 时执行 `global func_g; func_g = func_h`
+  - 第二次调用必须重新读取全局，才能看到 `func_h`
+- 结果：
+  - 期望值：`108`
+  - 实际值：`108`
+- 如果按 issue 建议把第二次 `LoadGlobalCached + GuardIs` 消掉，就会错误复用第一次守卫过的旧函数对象，语义将出错。
+
+### 结论
+- issue 17 当前描述的两个方案：
+  - 方案 A：对 `LoadGlobalCached` 做局部 CSE
+  - 方案 B：仅删除第二个 `GuardIs`
+  在给定的跨调用场景中都不安全。
+- 若未来继续做这类优化，范围必须缩小到：
+  - 同一基本块内
+  - 两次加载之间无 `hasArbitraryExecution` barrier
+  - 无可能影响 `AGlobal` 观察结果的操作
+- 本轮未提交 issue 17 代码修改。
+
+## 2026-03-10 Issue 18：exact list slice specialization（远端闭环）
+- 远端入口：`root@124.70.162.35`
+- issue：`https://github.com/113xiaoji/cinderx/issues/18`
+- 目标：对 exact list 的 `BuildSlice + BinaryOp<Subscript>` 做特化，去掉中间 `PySlice_New` 分配。
+
+### 结论
+- 已完成 exact-list slice 优化，范围限定为：
+  - `TListExact`
+  - `BuildSlice<2>`
+  - `start/stop` 为 `NoneType` 或 `LongExact`
+- 未覆盖：
+  - 非 exact list
+  - 带 `step` 的切片
+  - 通用容器切片
+
+### 实现
+- 新增 HIR：`ListSlice`
+- 新增 runtime helper：`JITRT_ListSlice(list, start, stop)`
+- 新增 post-refcount 清理 pass：`ListSliceCleanup`
+  - 删除特化后遗留的 dead `BuildSlice + Decref`
+- 保留现有单元素下标快路径；issue 18 的“阶段 1”在 exact list 上本来就已经有了。
+
+### 远端 HIR 验证
+使用本地 exact list 复现函数：
+- `lst = [10, 20, 30, 40, 50]`
+- `left = lst[:mid]`
+- `right = lst[mid + 1:]`
+- `item = lst[mid]`
+
+基线（clean worktree）final HIR opcode counts：
+- `BuildSlice: 2`
+- `BinaryOp: 2`
+- `CheckSequenceBounds: 1`
+- `LoadArrayItem: 1`
+- `Decref: 4`
+
+当前（modified worktree）final HIR opcode counts：
+- `ListSlice: 2`
+- `BuildSlice: 0`
+- generic slice `BinaryOp`: 0
+- `CheckSequenceBounds: 1`
+- `LoadArrayItem: 1`
+- `Decref: 2`
+
+功能结果：
+- `([10, 20], 30, [40, 50])`
+
+### 远端 benchmark
+- baseline worktree: `/root/work/cinderx-issue14-base`
+- current worktree: `/root/work/cinderx-git`
+- command style:
+  - `taskset -c 0`
+  - same GCC12 runtime library path
+  - same Python interpreter
+- workload：`test_local_list_slice()`
+- iterations：`1,000,000`
+- repeats：`7`
+
+结果（median）：
+- baseline: `1.3714s`
+- current: `1.0596s`
+- speedup: about `22.7%`

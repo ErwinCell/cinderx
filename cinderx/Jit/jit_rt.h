@@ -173,6 +173,13 @@ PyObject* JITRT_LoadGlobalFromThreadState(
 PyObject* JITRT_LoadGlobalsDict(PyThreadState* tstate);
 
 /*
+ * Slice an exact list without allocating an intermediate slice object.
+ *
+ * `start` and `stop` must be either `Py_None` or an exact `int`.
+ */
+PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop);
+
+/*
  * Helper to perform a Python call with dynamically determined arguments.
  *
  * pargs will be a possibly empty tuple of positional arguments, kwargs will be
