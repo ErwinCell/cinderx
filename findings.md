@@ -2951,3 +2951,12 @@ Note:
   - `1160: ldr d0, [x20, #16]`
   - `1164: fadd d8, d0, d0`
 - 结论：重复 `ldr d0/d1` 已消除，达到“单次 unbox + 自加”预期。
+# 2026-03-10 issue-15: slot version guard elimination
+
+- Added HIR pass SlotVersionGuardElimination to deduplicate redundant LOAD_ATTR_SLOT / STORE_ATTR_SLOT tp_version_tag guards by dominating receiver/tag pair.
+- The pass runs after Simplify and before PrimitiveUnboxCSE, and clears its active guard map on any instruction with arbitrary execution.
+- Added ARM runtime regression test ArmRuntimeTests.test_slot_type_version_guards_are_deduplicated.
+- Remote verification on 124.70.162.35 passed:
+  - test_slot_type_version_guards_are_deduplicated
+  - test_math_sqrt_cdouble_lowers_to_double_sqrt
+  - test_math_sqrt_negative_input_preserves_value_error

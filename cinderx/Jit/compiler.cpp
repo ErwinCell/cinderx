@@ -22,6 +22,7 @@
 #include "cinderx/Jit/hir/primitive_unbox_cse.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
+#include "cinderx/Jit/hir/slot_version_guard_elimination.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/jit_time_log.h"
 
@@ -92,6 +93,7 @@ void Compiler::runPasses(
   auto runSimplifyPassesIfEnabled = [&]() {
     if (config & PassConfig::kSimplify) {
       runPass(hir::Simplify{}, irfunc, callback);
+      runPass(hir::SlotVersionGuardElimination{}, irfunc, callback);
       runPass(hir::PrimitiveUnboxCSE{}, irfunc, callback);
     }
   };

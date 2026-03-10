@@ -784,6 +784,77 @@ class ArmRuntimeTests(unittest.TestCase):
                 proc.stdout.strip().splitlines()[-1], "valueerror", proc.stdout
             )
 
+    def test_slot_type_version_guards_are_deduplicated(self) -> None:
+        # Regression guard:
+        # repeated LOAD_ATTR_SLOT / STORE_ATTR_SLOT operations on the same SSA
+        # receiver should reuse a single dominating tp_version_tag guard.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Point:
+                __slots__ = ("x", "y", "z")
+
+                def __init__(self, x: float, y: float, z: float) -> None:
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def maximize(self, other: "Point") -> "Point":
+                    if other.x > self.x:
+                        self.x = other.x
+                    if other.y > self.y:
+                        self.y = other.y
+                    if other.z > self.z:
+                        self.z = other.z
+                    return self
+
+            a = Point(1.0, 2.0, 3.0)
+            b = Point(4.0, 5.0, 6.0)
+            for _ in range(100000):
+                a.maximize(b)
+                a.x, a.y, a.z = 1.0, 2.0, 3.0
+
+            assert jit.force_compile(Point.maximize)
+            out = a.maximize(b)
+            print(out.x, out.y, out.z)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/slot_guard_dedup.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPFINALHIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            load_slot_guards = dump.count("Descr 'LOAD_ATTR_SLOT'")
+            store_slot_guards = dump.count("Descr 'STORE_ATTR_SLOT'")
+            version_loads = dump.count("tp_version_tag")
+
+            self.assertEqual(store_slot_guards, 0, dump)
+            self.assertEqual(load_slot_guards, 2, dump)
+            self.assertEqual(version_loads, 2, dump)
+            self.assertIn("4.0 5.0 6.0", proc.stdout)
+
     def test_primitive_unbox_cse_for_float_add_self(self) -> None:
         # Regression guard:
         # for g(x) = x + x (float path), final HIR should keep a single
