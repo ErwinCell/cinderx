@@ -3107,3 +3107,46 @@ Note:
 - baseline: `1.3714s`
 - current: `1.0596s`
 - speedup: about `22.7%`
+## 2026-03-11 Task: raytrace mixed numeric specialized-op fix
+
+### Final fix
+- File:
+  - cinderx/Jit/hir/builder.cpp
+- Policy:
+  - for specialized numeric binary/compare opcodes, keep exact int guards only when the current code object has a backedge
+  - for no-backedge leaf helpers, skip those exact int guards
+  - float specialized-opcode guards remain enabled
+- Reason:
+  - raytrace leaf helpers like Vector.dot are mixed int/float and were deopting catastrophically under exact-int guards
+  - broad numeric-guard removal helped raytrace but regressed existing float-path tests
+  - the narrowed int-only no-backedge policy preserves float fast paths while fixing the mixed leaf case
+
+### Remote verification
+- Entry:
+  - ssh root@124.70.162.35
+- New targeted regression:
+  - ArmRuntimeTests.test_specialized_numeric_leaf_mixed_types_avoid_deopts
+  - result: OK
+- Existing float regressions re-run and passed:
+  - test_float_add_sub_mul_lower_to_double_binary_op_in_final_hir
+  - test_math_sqrt_cdouble_lowers_to_double_sqrt
+  - test_primitive_unbox_cse_for_float_add_self
+  - test_primitive_box_remat_elides_frame_state_only_boxes
+- Full remote file:
+  - python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+  - result: Ran 24 tests ... OK
+
+### raytrace direct benchmark
+- Command uses scripts/arm/bench_pyperf_direct.py against bm_raytrace/run_benchmark.py
+- compile_strategy=all, samples=5:
+  - median about 0.5742 s
+  - total_deopt_count = 0
+- compile_strategy=backedge, samples=5:
+  - median about 0.6623 s
+  - total_deopt_count = 0
+- compile_strategy=none, samples=5:
+  - median about 0.6025 s
+  - total_deopt_count = 0
+- Interpretation:
+  - the final narrowed policy removes the catastrophic mixed-type deopt storm
+  - on raytrace, CinderX JIT is now ahead of the previously recorded CPython JIT median (~0.6861 s)

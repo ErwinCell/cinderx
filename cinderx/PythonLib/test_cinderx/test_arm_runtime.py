@@ -153,6 +153,69 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 800, proc.stdout)
 
+    def test_specialized_numeric_leaf_mixed_types_avoid_deopts(self) -> None:
+        # Regression guard:
+        # specialized numeric opcodes should not pin no-backedge leaf helpers
+        # to exact int/float paths when runtime shapes are mixed.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import json
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class V:
+                __slots__ = ("x", "y", "z")
+
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+            def dot(a, b):
+                return (a.x * b.x) + (a.y * b.y) + (a.z * b.z)
+
+            # Seed int-specialized interpreter opcodes before JIT compilation.
+            for _ in range(5000):
+                dot(V(1, 2, 3), V(4, 5, 6))
+
+            assert jit.force_compile(dot)
+            jit.get_and_clear_runtime_stats()
+
+            for _ in range(20000):
+                dot(V(1.5, 2.5, 3.5), V(4.5, 5.5, 6.5))
+
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "dot"
+            ]
+            print(json.dumps(relevant))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/specialized_numeric_leaf_mixed_types.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            self.assertEqual(proc.stdout.strip(), "[]", proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

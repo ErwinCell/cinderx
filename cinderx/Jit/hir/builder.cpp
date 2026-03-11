@@ -261,6 +261,19 @@ bool isBannedName(std::string_view name) {
   return name == "eval" || name == "exec" || name == "locals";
 }
 
+bool codeHasBackedge(BorrowedRef<PyCodeObject> code) {
+  for (const auto& bc_instr : BytecodeInstructionBlock{code}) {
+    switch (bc_instr.opcode()) {
+      case JUMP_BACKWARD:
+      case JUMP_BACKWARD_NO_INTERRUPT:
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 // Allocate a temp register that may be used for the stack. It should not be a
@@ -2081,14 +2094,21 @@ void HIRBuilder::emitBinaryOp(
 
   int opcode = bc_instr.opcode();
   int oparg = bc_instr.oparg();
-
+  // Exact int guards on specialized numeric opcodes work well for loop-hot
+  // functions, but can be actively harmful for tiny mixed-numeric leaf helpers
+  // like raytrace's Vector.dot(). Keep the int guards only for code objects
+  // that actually contain a backedge. Preserve float exact guards so float-only
+  // leaf helpers can still lower to the existing unboxed fast paths.
+  bool specialize_int_guards = codeHasBackedge(code_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
       case BINARY_OP_MULTIPLY_INT:
       case BINARY_OP_SUBTRACT_INT:
-        tc.emit<GuardType>(left, TLongExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        if (specialize_int_guards) {
+          tc.emit<GuardType>(left, TLongExact, left, tc.frame);
+          tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        }
         break;
       case BINARY_OP_ADD_FLOAT:
       case BINARY_OP_MULTIPLY_FLOAT:
@@ -2682,7 +2702,7 @@ void HIRBuilder::emitCompareOp(
   Register* left = stack.pop();
   Register* result = temps_.AllocateStack();
   CompareOp op = static_cast<CompareOp>(compare_op);
-
+  bool specialize_int_guards = codeHasBackedge(code_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
@@ -2690,8 +2710,10 @@ void HIRBuilder::emitCompareOp(
         tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
         break;
       case COMPARE_OP_INT:
-        tc.emit<GuardType>(left, TLongExact, left, tc.frame);
-        tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        if (specialize_int_guards) {
+          tc.emit<GuardType>(left, TLongExact, left, tc.frame);
+          tc.emit<GuardType>(right, TLongExact, right, tc.frame);
+        }
         break;
       case COMPARE_OP_STR:
         tc.emit<GuardType>(left, TUnicodeExact, left, tc.frame);
