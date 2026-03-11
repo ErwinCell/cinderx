@@ -260,6 +260,7 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
     case Opcode::kGetANext:
     case Opcode::kGetIter:
     case Opcode::kGetLength:
+    case Opcode::kGetLengthInt64:
     case Opcode::kGetTuple:
     case Opcode::kGuard:
     case Opcode::kGuardNonNegativeDouble:

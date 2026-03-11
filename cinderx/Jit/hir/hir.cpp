@@ -484,6 +484,7 @@ bool Instr::isReplayable() const {
     case Opcode::kLoadModuleMethodCached:
     case Opcode::kLoadMethodSuper:
     case Opcode::kLoadSpecial:
+    case Opcode::kGetLengthInt64:
     case Opcode::kLongBinaryOp:
     case Opcode::kLongInPlaceOp:
     case Opcode::kMakeCell:
@@ -729,6 +730,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kGetANext:
     case Opcode::kGetIter:
     case Opcode::kGetLength:
+    case Opcode::kGetLengthInt64:
     case Opcode::kGetSecondOutput:
     case Opcode::kGetTuple:
     case Opcode::kImportFrom:

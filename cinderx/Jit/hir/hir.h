@@ -3274,6 +3274,12 @@ DEFINE_SIMPLE_INSTR(GetANext, (TObject), HasOutput, Operands<1>, DeoptBase);
 
 // Get the length of an object by calling __len__.
 DEFINE_SIMPLE_INSTR(GetLength, (TObject), HasOutput, Operands<1>, DeoptBase);
+DEFINE_SIMPLE_INSTR(
+    GetLengthInt64,
+    (TObject),
+    HasOutput,
+    Operands<1>,
+    DeoptBase);
 
 // Invoke next() on the iterator.
 //

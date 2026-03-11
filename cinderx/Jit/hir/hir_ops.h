@@ -64,6 +64,7 @@ namespace jit::hir {
   V(GetANext)                          \
   V(GetIter)                           \
   V(GetLength)                         \
+  V(GetLengthInt64)                    \
   V(GetSecondOutput)                   \
   V(GetTuple)                          \
   V(Guard)                             \

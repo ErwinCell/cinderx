@@ -938,6 +938,71 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(version_loads, 2, dump)
             self.assertIn("4.0 5.0 6.0", proc.stdout)
 
+    def test_len_arithmetic_uses_primitive_int_chain(self) -> None:
+        # Regression guard:
+        # len() feeding `== 0`, `// 2`, and `+ 1` should avoid LongCompare /
+        # LongBinaryOp on the hot arithmetic chain.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def test_len_arithmetic(lst):
+                n = len(lst)
+                if n == 0:
+                    return -1
+                mid = n // 2
+                idx = mid + 1
+                return idx
+
+            data = list(range(50))
+            for _ in range(100000):
+                test_len_arithmetic(data)
+
+            assert jit.force_compile(test_len_arithmetic)
+            print(test_len_arithmetic([]))
+            print(test_len_arithmetic([1]))
+            print(test_len_arithmetic([1, 2]))
+            print(test_len_arithmetic([1, 2, 3]))
+            print(test_len_arithmetic([1, 2, 3, 4]))
+            print(test_len_arithmetic(data))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/len_arithmetic_primitive_chain.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPFINALHIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            self.assertNotIn("LongCompare<Equal>", dump)
+            self.assertNotIn("LongBinaryOp<FloorDivide>", dump)
+            self.assertNotIn("LongBinaryOp<Add>", dump)
+            self.assertIn("PrimitiveCompare<Equal>", dump)
+            self.assertIn("IntBinaryOp<", dump)
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertEqual(lines[-6:], ["-1", "1", "2", "2", "3", "26"])
+
     def test_primitive_unbox_cse_for_float_add_self(self) -> None:
         # Regression guard:
         # for g(x) = x + x (float path), final HIR should keep a single

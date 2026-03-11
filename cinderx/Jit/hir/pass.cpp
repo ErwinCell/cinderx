@@ -226,6 +226,8 @@ Type outputType(
       return TMortalUnicode;
     case Opcode::kGetLength:
       return TLongExact;
+    case Opcode::kGetLengthInt64:
+      return TCInt64;
     case Opcode::kCopyDictWithoutKeys:
       return TDictExact;
     case Opcode::kUnaryOp: {

@@ -549,6 +549,7 @@ Py_ssize_t JITRT_CheckSequenceBounds(PyObject* seq, Py_ssize_t i);
 /* Call obj.__len__(). Return LongExact on success or NULL with an exception
  * set if there was an error. */
 PyObject* JITRT_GetLength(PyObject* obj);
+int64_t JITRT_GetLengthInt64(PyObject* obj);
 
 /* Call match_keys() in ceval.c
  * NOTE: This function is here as a wrapper around the private match_keys

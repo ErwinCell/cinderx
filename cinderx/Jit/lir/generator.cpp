@@ -2682,6 +2682,13 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             instr->output(), JITRT_GetLength, instr->GetOperand(0));
         break;
       }
+      case Opcode::kGetLengthInt64: {
+        auto instr = static_cast<const GetLengthInt64*>(&i);
+        Instruction* result = bbb.appendCallInstruction(
+            instr->output(), JITRT_GetLengthInt64, instr->GetOperand(0));
+        appendGuard(bbb, InstrGuardKind::kNotNegative, *instr, result);
+        break;
+      }
       case Opcode::kPhi: {
         auto instr = static_cast<const Phi*>(&i);
         bbb.appendInstr(instr->output(), Instruction::kPhi);

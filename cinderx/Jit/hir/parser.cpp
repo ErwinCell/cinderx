@@ -739,6 +739,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<GetIter>(dst, iterable);
       break;
     }
+    case Opcode::kGetLengthInt64: {
+      auto container = ParseRegister();
+      NEW_INSTR(GetLengthInt64, dst, container, FrameState{});
+      break;
+    }
     case Opcode::kGetSecondOutput: {
       expect("<");
       Type ty = parseType(GetNextToken());

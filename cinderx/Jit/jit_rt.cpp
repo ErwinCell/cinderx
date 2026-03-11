@@ -2134,6 +2134,10 @@ PyObject* JITRT_GetLength(PyObject* obj) {
   return PyLong_FromSsize_t(len);
 }
 
+int64_t JITRT_GetLengthInt64(PyObject* obj) {
+  return PyObject_Length(obj);
+}
+
 int JITRT_DictUpdate(PyThreadState* tstate, PyObject* dict, PyObject* update) {
   if (PyDict_Update(dict, update) < 0) {
     if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {

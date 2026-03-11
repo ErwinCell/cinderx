@@ -13,6 +13,7 @@
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/copy_propagation.h"
+#include "cinderx/Jit/hir/pass.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/type.h"
 #include "cinderx/Jit/threaded_compile.h"
@@ -374,10 +375,11 @@ Register* emitGetLengthInt64(Env& env, Register* obj) {
 
 Register* simplifyGetLength(Env& env, const GetLength* instr) {
   Register* obj = instr->GetOperand(0);
-  if (Register* size = emitGetLengthInt64(env, obj)) {
-    return env.emit<PrimitiveBox>(size, TCInt64, *instr->frameState());
+  Register* size = emitGetLengthInt64(env, obj);
+  if (size == nullptr) {
+    size = env.emit<GetLengthInt64>(obj, *instr->frameState());
   }
-  return nullptr;
+  return env.emit<PrimitiveBox>(size, TCInt64, *instr->frameState());
 }
 
 Register* simplifyIntConvert(Env& env, const IntConvert* instr) {
@@ -392,6 +394,92 @@ Register* simplifyIntConvert(Env& env, const IntConvert* instr) {
 bool isIntConst(Register* reg, intptr_t value) {
   Type ty = reg->type();
   return ty.hasIntSpec() && ty.intSpec() == value;
+}
+
+std::optional<int64_t> getBoxedLongConst(Register* reg) {
+  reg = chaseAssignOperand(reg);
+  Type ty = reg->type();
+  if (ty.hasIntSpec()) {
+    return ty.intSpec();
+  }
+  if (!ty.hasObjectSpec() || !PyLong_CheckExact(ty.objectSpec())) {
+    return std::nullopt;
+  }
+
+  int overflow = 0;
+  long long value = PyLong_AsLongLongAndOverflow(ty.objectSpec(), &overflow);
+  PyErr_Clear();
+  if (overflow != 0) {
+    return std::nullopt;
+  }
+  return static_cast<int64_t>(value);
+}
+
+bool isLenDerivedInt(Register* reg) {
+  reg = chaseAssignOperand(reg);
+  if (!(reg->type() <= TCInt64)) {
+    return false;
+  }
+
+  Instr* instr = reg->instr();
+  if (instr->IsGetLengthInt64()) {
+    return true;
+  }
+  if (instr->IsLoadField()) {
+    auto* load = static_cast<LoadField*>(instr);
+    if (!(load->type() <= TCInt64)) {
+      return false;
+    }
+    if (load->name() == "ob_size" &&
+        load->offset() == offsetof(PyVarObject, ob_size)) {
+      return true;
+    }
+    if (load->name() == "ma_used" &&
+        load->offset() == offsetof(PyDictObject, ma_used)) {
+      return true;
+    }
+    if (load->name() == "used" &&
+        load->offset() == offsetof(PySetObject, used)) {
+      return true;
+    }
+    if (load->name() == "length" &&
+        load->offset() == offsetof(PyASCIIObject, length)) {
+      return true;
+    }
+    return false;
+  }
+
+  if (instr->IsIntBinaryOp()) {
+    auto* binop = static_cast<IntBinaryOp*>(instr);
+    switch (binop->op()) {
+      case BinaryOpKind::kAdd:
+        return (isLenDerivedInt(binop->left()) &&
+                getBoxedLongConst(binop->right()).has_value()) ||
+            (isLenDerivedInt(binop->right()) &&
+             getBoxedLongConst(binop->left()).has_value());
+      case BinaryOpKind::kRShift:
+        return isLenDerivedInt(binop->left()) &&
+            getBoxedLongConst(binop->right()).has_value();
+      default:
+        return false;
+    }
+  }
+
+  return false;
+}
+
+Register* unboxLenArithmeticInt(Register* reg) {
+  reg = chaseAssignOperand(reg);
+  if (reg->type() <= TCInt64) {
+    return reg;
+  }
+  if (reg->instr()->IsPrimitiveBox()) {
+    auto* box = static_cast<PrimitiveBox*>(reg->instr());
+    if (box->value()->type() <= TCInt64) {
+      return box->value();
+    }
+  }
+  return nullptr;
 }
 
 Register* emitIntConstantLikeOutput(Env& env, Type output_type, uint64_t value) {
@@ -700,6 +788,41 @@ Register* simplifyLoadModuleMethodCached(
 #endif
 }
 
+Register* simplifyLongCompare(Env& env, const LongCompare* instr) {
+  Register* left = unboxLenArithmeticInt(instr->left());
+  Register* right = unboxLenArithmeticInt(instr->right());
+  std::optional<int64_t> left_const = getBoxedLongConst(instr->left());
+  std::optional<int64_t> right_const = getBoxedLongConst(instr->right());
+
+  if (left == nullptr && !left_const.has_value()) {
+    return nullptr;
+  }
+  if (right == nullptr && !right_const.has_value()) {
+    return nullptr;
+  }
+
+  bool len_like_left = left != nullptr && isLenDerivedInt(left);
+  bool len_like_right = right != nullptr && isLenDerivedInt(right);
+  if (!len_like_left && !len_like_right) {
+    return nullptr;
+  }
+
+  auto prim_op = toPrimitiveCompareOp(instr->op());
+  if (!prim_op.has_value()) {
+    return nullptr;
+  }
+
+  if (left == nullptr) {
+    left = env.emit<LoadConst>(Type::fromCInt(*left_const, TCInt64));
+  }
+  if (right == nullptr) {
+    right = env.emit<LoadConst>(Type::fromCInt(*right_const, TCInt64));
+  }
+
+  Register* result = env.emit<PrimitiveCompare>(*prim_op, left, right);
+  return env.emit<PrimitiveBoxBool>(result);
+}
+
 Register* simplifyLoadTypeMethodCached(Env& env, const LoadMethod* load_meth) {
   Register* receiver = load_meth->GetOperand(0);
   const int cache_id = env.func.env.allocateLoadTypeMethodCache();
@@ -988,6 +1111,33 @@ Register* simplifyInPlaceOp(Env& env, const InPlaceOp* instr) {
 }
 
 Register* simplifyLongBinaryOp(Env& env, const LongBinaryOp* instr) {
+  Register* left = unboxLenArithmeticInt(instr->left());
+  Register* right = unboxLenArithmeticInt(instr->right());
+  auto right_const = getBoxedLongConst(instr->right());
+  auto left_const = getBoxedLongConst(instr->left());
+
+  if (instr->op() == BinaryOpKind::kFloorDivide &&
+      left != nullptr && right_const.has_value() && *right_const == 2 &&
+      isLenDerivedInt(left)) {
+      Register* shift = env.emit<LoadConst>(Type::fromCInt(1, TCInt64));
+      Register* result = env.emit<IntBinaryOp>(BinaryOpKind::kRShift, left, shift);
+      return env.emit<PrimitiveBox>(result, TCInt64, *instr->frameState());
+  }
+  if (instr->op() == BinaryOpKind::kAdd) {
+    if (left != nullptr && right_const.has_value() && isLenDerivedInt(left)) {
+      Register* addend =
+          env.emit<LoadConst>(Type::fromCInt(*right_const, TCInt64));
+      Register* result = env.emit<IntBinaryOp>(BinaryOpKind::kAdd, left, addend);
+      return env.emit<PrimitiveBox>(result, TCInt64, *instr->frameState());
+    }
+    if (right != nullptr && left_const.has_value() && isLenDerivedInt(right)) {
+      Register* addend =
+          env.emit<LoadConst>(Type::fromCInt(*left_const, TCInt64));
+      Register* result = env.emit<IntBinaryOp>(BinaryOpKind::kAdd, right, addend);
+      return env.emit<PrimitiveBox>(result, TCInt64, *instr->frameState());
+    }
+  }
+
   // This isn't safe in the multi-threaded compilation on 3.12 because
   // we don't hold the GIL which is required for allocation.
   RETURN_MULTITHREADED_COMPILE(nullptr);
@@ -2259,6 +2409,8 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
 
     case Opcode::kCompare:
       return simplifyCompare(env, static_cast<const Compare*>(instr));
+    case Opcode::kLongCompare:
+      return simplifyLongCompare(env, static_cast<const LongCompare*>(instr));
 
     case Opcode::kCondBranch:
       return simplifyCondBranch(env, static_cast<const CondBranch*>(instr));

@@ -134,6 +134,7 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kGetANext:
     case Opcode::kGetIter:
     case Opcode::kGetLength:
+    case Opcode::kGetLengthInt64:
     case Opcode::kImportFrom:
     case Opcode::kImportName:
     case Opcode::kInPlaceOp:
@@ -496,6 +497,7 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kGetANext:
     case Opcode::kGetIter:
     case Opcode::kGetLength:
+    case Opcode::kGetLengthInt64:
     case Opcode::kGetTuple:
     case Opcode::kImportFrom:
     case Opcode::kImportName:
