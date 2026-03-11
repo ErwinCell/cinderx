@@ -69,3 +69,33 @@
   - baseline `1.3714s`
   - current `1.0596s`
   - about `22.7%` faster
+
+## Parameter-Typed List Follow-up
+- The user-facing test shape:
+  - `def test_list_slice(lst: list): ...`
+  did not initially hit the fast path even after `ListSlice` landed.
+- Root cause:
+  - without annotation guards, the parameter remained `Object` in final HIR
+  - it never reached `TList`/`TListExact`
+  - so `ListSlice` / `LoadArrayItem` specialization could not trigger
+- Verified on remote:
+  - explicitly enabling `enable_emit_type_annotation_guards()` immediately produced:
+    - `GuardType: 1`
+    - `ListSlice: 2`
+    - `LoadArrayItem: 1`
+- Implemented follow-up:
+  - when `specialized_opcodes` is enabled, load function annotations and emit
+    entry `GuardType` checks for a small builtin whitelist:
+    - `list`, `tuple`, `dict`, `str`, `int`, `float`
+  - this keeps the broader `emit_type_annotation_guards` option intact while
+    enabling only builtin-specialization-relevant guards by default
+
+## Parameter-Typed Benchmark
+- Workload:
+  - `test_list_slice(lst: list)` with a list argument
+  - `1,000,000` iterations
+  - `7` repeats
+- Median:
+  - baseline `0.8109s`
+  - current `0.6255s`
+  - about `22.9%` faster

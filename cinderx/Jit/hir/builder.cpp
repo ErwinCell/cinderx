@@ -593,6 +593,14 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
 
   PyCodeObject* const code = tc.frame.code;
   bool first = true;
+  bool full_annotation_guards = getConfig().emit_type_annotation_guards;
+
+  auto should_emit_builtin_specialization_guard = [](PyObject* annotation) {
+    auto* type = reinterpret_cast<PyTypeObject*>(annotation);
+    return type == &PyList_Type || type == &PyTuple_Type ||
+        type == &PyDict_Type || type == &PyUnicode_Type ||
+        type == &PyLong_Type || type == &PyFloat_Type;
+  };
 
   for (int arg_idx = 0; arg_idx < preloader_.numArgs(); arg_idx++) {
     PyObject* annotation = index->find(getVarname(code, arg_idx));
@@ -604,6 +612,10 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
     // be beneficial in the future to support runtime checks for these kinds of
     // annotations.
     if (!annotation || !PyType_Check(annotation)) {
+      continue;
+    }
+    if (!full_annotation_guards &&
+        !should_emit_builtin_specialization_guard(annotation)) {
       continue;
     }
 
