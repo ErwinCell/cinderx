@@ -42,6 +42,41 @@ namespace jit::hir {
 
 namespace {
 
+std::optional<Type> getLoadGlobalGuardType(BorrowedRef<> value) {
+  Type value_type = Type::fromObject(value);
+  PyTypeObject* pytype = Py_TYPE(value);
+  Type exact_type = Type::fromTypeExact(pytype);
+
+  // Mortal exact ints are identity-unstable once they move outside the
+  // immortal small-int range. Keep the cached load, but guard on exact type
+  // instead of the compile-time object identity so TIMESTAMP += 1 style
+  // counters can stay on the compiled path.
+  if (PyLong_CheckExact(value) && !(value_type <= TImmortalLongExact)) {
+    return exact_type;
+  }
+
+  // Stable globals such as modules, functions, and types still benefit from
+  // identity guards because they unlock stronger constant propagation.
+  if (_Py_IsImmortal(value) || PyModule_CheckExact(value) ||
+      PyFunction_Check(value) || PyCFunction_Check(value) ||
+      PyType_Check(value)) {
+    return std::nullopt;
+  }
+
+  // Heap-type instances are commonly rebound to new objects of the same exact
+  // type (for example planner = Planner()). Guarding on type avoids turning
+  // those globals into persistent deopt sites while preserving downstream
+  // exact-type specialization.
+  if (!PyType_HasFeature(pytype, Py_TPFLAGS_HEAPTYPE)) {
+    return std::nullopt;
+  }
+
+  if (!exact_type.isExact() || exact_type.runtimePyType() == nullptr) {
+    return std::nullopt;
+  }
+  return exact_type;
+}
+
 // Check that an opcode is one we know how to translate into HIR.
 bool isSupportedOpcode(int opcode) {
   switch (opcode) {
@@ -3749,13 +3784,8 @@ void HIRBuilder::emitLoadGlobal(
     tc.emit<LoadGlobalCached>(
         result, code_, preloader_.builtins(), preloader_.globals(), name_idx);
     DeoptBase* guard = nullptr;
-    // Mortal exact ints are identity-unstable once they move outside the
-    // immortal small-int range. Keep the cached load, but guard on exact type
-    // instead of the compile-time object identity so TIMESTAMP += 1 style
-    // counters can stay on the compiled path.
-    if (PyLong_CheckExact(value) && !(Type::fromObject(value) <= TImmortalLongExact)) {
-      guard = tc.emit<GuardType>(
-          result, Type::fromTypeExact(Py_TYPE(value)), result, tc.frame);
+    if (auto guard_type = getLoadGlobalGuardType(value)) {
+      guard = tc.emit<GuardType>(result, *guard_type, result, tc.frame);
     } else {
       guard = tc.emit<GuardIs>(result, value, result);
     }

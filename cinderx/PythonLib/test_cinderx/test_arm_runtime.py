@@ -216,6 +216,84 @@ class ArmRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(proc.stdout.strip(), "[]", proc.stdout)
 
+    def test_load_global_rebound_object_uses_type_guard(self) -> None:
+        # Regression guard:
+        # rebinding a mutable object global should not pin the compiled path to
+        # a single instance identity, otherwise every later call deopts.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Planner:
+                __slots__ = ("current_mark",)
+
+                def __init__(self):
+                    self.current_mark = 0
+
+                def new_mark(self):
+                    self.current_mark += 1
+                    return self.current_mark
+
+            planner = Planner()
+
+            def get_planner():
+                global planner
+                return planner
+
+            assert jit.force_compile(get_planner)
+            assert jit.is_jit_compiled(get_planner)
+
+            counts = cinderjit.get_function_hir_opcode_counts(get_planner)
+
+            jit.get_and_clear_runtime_stats()
+            for _ in range(5):
+                planner = Planner()
+                for _ in range(2000):
+                    get_planner().new_mark()
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats.get("deopt", [])
+                if entry["normal"]["func_qualname"] == "get_planner"
+            )
+
+            print(counts.get("GuardIs", 0))
+            print(counts.get("GuardType", 0))
+            print(deopt_count)
+            print(planner.current_mark)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/load_global_rebound_object_guard.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 2000, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 
