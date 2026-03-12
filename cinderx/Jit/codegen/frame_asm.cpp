@@ -92,19 +92,31 @@ void initThreadStateOffset() {
   // out that offset.
   uint32_t* ts_func = reinterpret_cast<uint32_t*>(&_PyThreadState_GetCurrent);
 
+  size_t scan_start = 0;
+  uint32_t reg = 0;
+  bool matched = false;
+
   if (ts_func[0] == 0xa9bf7bfd && // stp x29, x30, [sp, #-16]!
       ts_func[1] == 0x910003fd && // mov x29, sp
-      ((ts_func[2] & ~0x1f) == 0xd53bd048) // mrs x?, tpidr_el0
+      ((ts_func[2] & ~0x1f) == 0xd53bd040) // mrs x?, tpidr_el0
   ) {
     // Here we know we are loading the thread local base offset into some
     // register, based on the mrs instruction.
-    uint32_t reg = ts_func[2] & 0x1f;
-    int32_t current_offset = 0;
+    reg = ts_func[2] & 0x1f;
+    scan_start = 3;
+    matched = true;
+  } else if ((ts_func[0] & ~0x1f) == 0xd53bd040) { // mrs x?, tpidr_el0 (no prologue)
+    reg = ts_func[0] & 0x1f;
+    scan_start = 1;
+    matched = true;
+  } 
 
+  if (matched) {
+    int32_t current_offset = 0;
     // Now, we will interpret any subsequent add instructions in order to
     // determine the offset. We will know we are done when we hit an ldr x0, or
     // we hit something unknown and need to break.
-    for (size_t index = 3;; index++) {
+    for (size_t index = scan_start;; index++) {
       if (ts_func[index] == (0xf9400000 | (reg << 5))) {
         // ldr x0, [x?]
         //
@@ -134,7 +146,7 @@ void initThreadStateOffset() {
 
     tstate_offset = current_offset;
   }
-
+} // if matched
 #ifndef Py_DEBUG
   if (tstate_offset == -1) {
     assert(false);
