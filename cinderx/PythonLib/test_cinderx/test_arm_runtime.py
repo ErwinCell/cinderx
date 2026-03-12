@@ -711,6 +711,75 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(len(lines), 5, proc.stdout)
             self.assertEqual(int(lines[-1]), 200001, proc.stdout)
 
+    def test_generator_low_local_attr_access_uses_field_lowering(self) -> None:
+        # Regression guard:
+        # low-local generator helpers such as Tree.__iter__ should not be
+        # blocked from instance-value lowering just because co_nlocals is small.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Tree:
+                def __init__(self, left, value, right):
+                    self.left = left
+                    self.value = value
+                    self.right = right
+
+                def __iter__(self):
+                    if self.left:
+                        yield from self.left
+                    yield self.value
+                    if self.right:
+                        yield from self.right
+
+            def tree(items):
+                n = len(items)
+                if n == 0:
+                    return None
+                i = n // 2
+                return Tree(tree(items[:i]), items[i], tree(items[i + 1 :]))
+
+            root = tree(range(10))
+            for _ in range(2000):
+                for _ in root:
+                    pass
+
+            assert jit.force_compile(Tree.__iter__)
+            counts = cinderjit.get_function_hir_opcode_counts(Tree.__iter__)
+            print(counts.get("LoadField", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(list(root))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/generator_low_local_field_lowering.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 3, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(lines[-1], str(list(range(10))), proc.stdout)
+
     def test_int_binary_identity_simplify_reduces_compiled_size(self) -> None:
         # Regression guard for IntBinaryOp identity simplification in HIR.
         # For a stable static-int loop shape, simplify-on should emit smaller

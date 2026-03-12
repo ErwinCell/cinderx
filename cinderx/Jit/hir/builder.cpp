@@ -2880,6 +2880,12 @@ void HIRBuilder::emitLoadAttr(
 #if PY_VERSION_HEX >= 0x030E0000
       const char* env = std::getenv("PYTHONJITINSTANCEVALUEMINLOCALS");
       if (env == nullptr) {
+        if (code_->co_flags & kCoFlagsAnyGenerator) {
+          // Generator helpers such as Tree.__iter__ are often hot despite
+          // having very few locals. Don't block instance-value lowering on the
+          // generic low-local threshold in that case.
+          return 0;
+        }
         return 10;
       }
       int value = std::atoi(env);
