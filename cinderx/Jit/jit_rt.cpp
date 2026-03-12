@@ -816,6 +816,14 @@ void JITRT_DecrefFrame(PyFrameObject* frame) {
   }
 }
 
+void JITRT_Decref(PyObject* obj) {
+  Py_DECREF(obj);
+}
+
+void JITRT_XDecref(PyObject* obj) {
+  Py_XDECREF(obj);
+}
+
 #if PY_VERSION_HEX < 0x030C0000
 void JITRT_UnlinkPyFrame(PyThreadState* tstate) {
   PyFrameObject* f = tstate->frame;

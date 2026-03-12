@@ -2,6 +2,7 @@
 
 import platform
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -779,6 +780,86 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-3]), 3, proc.stdout)
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], str(list(range(10))), proc.stdout)
+
+    def test_generator_decref_lowering_stays_compact(self) -> None:
+        # Regression guard:
+        # generator decrefs should not explode into one multi-block inline
+        # sequence per site. Keep Tree.__iter__ LIR reasonably compact.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Tree:
+                def __init__(self, left, value, right):
+                    self.left = left
+                    self.value = value
+                    self.right = right
+
+                def __iter__(self):
+                    if self.left:
+                        yield from self.left
+                    yield self.value
+                    if self.right:
+                        yield from self.right
+
+            def tree(items):
+                n = len(items)
+                if n == 0:
+                    return None
+                i = n // 2
+                return Tree(tree(items[:i]), items[i], tree(items[i + 1 :]))
+
+            root = tree(range(10))
+            for _ in range(2000):
+                for _ in root:
+                    pass
+
+            assert jit.force_compile(Tree.__iter__)
+            print("compiled_size", cinderjit.get_compiled_size(Tree.__iter__))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/generator_decref_compact_lir.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPLIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            match = re.search(
+                r"LIR for __main__:Tree\.__iter__ after generation:\n(.*?)(?:\nJIT: .*?LIR for |\Z)",
+                dump,
+                re.S,
+            )
+            self.assertIsNotNone(match, dump)
+            section = match.group(1)
+            bb_count = len(re.findall(r"^BB %", section, re.M))
+
+            size_match = re.search(r"compiled_size\s+(\d+)", proc.stdout)
+            self.assertIsNotNone(size_match, proc.stdout)
+            compiled_size = int(size_match.group(1))
+
+            self.assertLessEqual(bb_count, 45, dump)
+            self.assertLessEqual(compiled_size, 2600, proc.stdout)
 
     def test_int_binary_identity_simplify_reduces_compiled_size(self) -> None:
         # Regression guard for IntBinaryOp identity simplification in HIR.

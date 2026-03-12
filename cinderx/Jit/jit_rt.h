@@ -77,6 +77,9 @@ JITRT_UnlinkGenFrameAndReturnGenDataFooter(PyThreadState* tstate);
  */
 void JITRT_DecrefFrame(PyFrameObject* frame);
 
+void JITRT_Decref(PyObject* obj);
+void JITRT_XDecref(PyObject* obj);
+
 /*
  * Helper function to unlink only the python frame.
  *

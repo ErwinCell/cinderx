@@ -14,6 +14,10 @@
   - `BatchDecref = 0`
   - `Decref = 10`
   - output sequence: `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`
+- After the second-phase generator-only decref lowering change, a targeted remote LIR repro showed:
+  - `bb_count = 43`
+  - `compiled_size = 2424`
+  - output sequence still `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`
 
 ## Key Conclusion
 - The dominant issue confirmed here was not generic `LoadAttrCached` CSE.
@@ -24,5 +28,5 @@
 - Refcount/decref expansion remains visible:
   - `Decref = 10`
   - `BatchDecref = 0`
-- That problem is real, but it was not the first bottleneck to address for this benchmark.
-- A follow-up pass would be needed to attack generator-specific decref compaction.
+- The generator-specific helper lowering reduced code size / block count pressure, but it does not remove HIR decref sites.
+- A future follow-up could still pursue smarter HIR-level decref batching or motion if more performance is needed.

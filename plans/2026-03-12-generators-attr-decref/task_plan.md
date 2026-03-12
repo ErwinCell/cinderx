@@ -34,3 +34,11 @@ Reduce the generator-path overhead exposed by the `generators.py` benchmark, wit
   - `Decref = 10`
   - `BatchDecref = 0`
 - This confirms attr-cache C calls were removed for the generator path, while decref blowup remains a follow-up optimization area.
+
+## Phase 2 Result
+- Generator `Decref/XDecref` lowering now uses runtime helpers instead of per-site multi-block inline expansion.
+- Remote ARM verification passed again through the standard entry script.
+- A targeted remote LIR repro showed:
+  - `bb_count = 43`
+  - `compiled_size = 2424`
+  - output sequence still `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`
