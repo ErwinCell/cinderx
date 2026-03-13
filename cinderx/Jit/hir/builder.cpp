@@ -4266,23 +4266,52 @@ void HIRBuilder::emitStoreSubscr(
   Register* container = stack.pop();
   Register* value = stack.pop();
 
-  if (getConfig().specialized_opcodes) {
+  auto is_float_arith_store_value = [](Register* reg) {
+    const Instr* instr = reg->instr();
+    if (instr->IsPrimitiveBox()) {
+      return static_cast<const PrimitiveBox*>(instr)->type() <= TCDouble;
+    }
+    if (instr->IsBinaryOp()) {
+      auto op = static_cast<const BinaryOp*>(instr)->op();
+      return op == BinaryOpKind::kAdd || op == BinaryOpKind::kSubtract ||
+          op == BinaryOpKind::kMultiply;
+    }
+    if (instr->IsInPlaceOp()) {
+      auto op = static_cast<const InPlaceOp*>(instr)->op();
+      return op == InPlaceOpKind::kAdd || op == InPlaceOpKind::kSubtract ||
+          op == InPlaceOpKind::kMultiply;
+    }
+    return false;
+  };
+  bool has_boxed_double_value = is_float_arith_store_value(value);
+
+  if (getConfig().specialized_opcodes && has_boxed_double_value) {
     BorrowedRef<PyTypeObject> array_type = getStdlibArrayType();
     if (array_type != nullptr) {
+      TranslationContext deopt_path{cfg.AllocateBlock(), tc.frame};
+      deopt_path.frame.stack.push(value);
+      deopt_path.frame.stack.push(container);
+      deopt_path.frame.stack.push(sub);
+      deopt_path.frame.cur_instr_offs = bc_instr.baseOffset();
+      deopt_path.emitSnapshot();
+      Deopt* deopt = deopt_path.emit<Deopt>();
+      deopt->setGuiltyReg(container);
+      deopt->setDescr("STORE_SUBSCR array.array('d')");
+
       BasicBlock* fast_path = cfg.AllocateBlock();
       BasicBlock* long_index_path = cfg.AllocateBlock();
       BasicBlock* float_value_path = cfg.AllocateBlock();
-      BasicBlock* slow_path = cfg.AllocateBlock();
       BasicBlock* double_store_path = cfg.AllocateBlock();
       BasicBlock* done_path = cfg.AllocateBlock();
       tc.emit<CondBranchCheckType>(
           container,
           Type::fromTypeExact(array_type),
           fast_path,
-          slow_path);
+          deopt_path.block);
 
       tc.block = fast_path;
-      tc.emit<CondBranchCheckType>(sub, TLongExact, long_index_path, slow_path);
+      tc.emit<CondBranchCheckType>(
+          sub, TLongExact, long_index_path, deopt_path.block);
 
       tc.block = long_index_path;
       tc.emit<RefineType>(sub, TLongExact, sub);
@@ -4290,7 +4319,7 @@ void HIRBuilder::emitStoreSubscr(
       unboxPrimitive(tc, unboxed_idx, sub, TCInt64);
 
       tc.emit<CondBranchCheckType>(
-          value, TFloatExact, float_value_path, slow_path);
+          value, TFloatExact, float_value_path, deopt_path.block);
 
       tc.block = float_value_path;
       tc.emit<RefineType>(value, TFloatExact, value);
@@ -4319,7 +4348,7 @@ void HIRBuilder::emitStoreSubscr(
       Register* matches = temps_.AllocateStack();
       tc.emit<PrimitiveCompare>(
           matches, PrimitiveCompareOp::kEqual, typecode, expected);
-      tc.emit<CondBranch>(matches, double_store_path, slow_path);
+      tc.emit<CondBranch>(matches, double_store_path, deopt_path.block);
 
       tc.block = double_store_path;
       Register* adjusted_idx = temps_.AllocateStack();
@@ -4333,13 +4362,6 @@ void HIRBuilder::emitStoreSubscr(
           TCPtr);
       tc.emit<StoreArrayItem>(
           ob_item, adjusted_idx, unboxed_value, container, TCDouble);
-      tc.emit<Branch>(done_path);
-
-      tc.block = slow_path;
-      if (bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {
-        tc.emit<GuardType>(container, TDictExact, container, tc.frame);
-      }
-      tc.emit<StoreSubscr>(container, sub, value, tc.frame);
       tc.emit<Branch>(done_path);
 
       tc.block = done_path;
