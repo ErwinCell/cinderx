@@ -146,7 +146,6 @@ void initThreadStateOffset() {
 
     tstate_offset = current_offset;
   }
-} // if matched
 #ifndef Py_DEBUG
   if (tstate_offset == -1) {
     assert(false);
