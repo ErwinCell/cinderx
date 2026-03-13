@@ -995,6 +995,74 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIn("DoubleBinaryOp<Subtract>", dump)
             self.assertIn("DoubleBinaryOp<Multiply>", dump)
 
+    def test_int_initialized_float_accumulator_avoids_repeated_deopts(self) -> None:
+        # Regression guard:
+        # `s = 0` followed by `s += float_value` in a hot loop should not
+        # deopt on the first iteration of every call once JIT-compiled.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def accumulate(data):
+                s = 0
+                for x in data:
+                    s += x
+                return s
+
+            data = [1.0] * 1000
+            accumulate(data)
+            accumulate(data)
+            assert jit.force_compile(accumulate)
+
+            jit.get_and_clear_runtime_stats()
+            result = 0.0
+            for _ in range(200):
+                result = accumulate(data)
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats.get("deopt", [])
+                if entry["normal"]["func_qualname"] == "accumulate"
+            )
+            print(deopt_count)
+            print(result)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/int_initialized_float_accumulator.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPFINALHIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            self.assertIn("DoubleBinaryOp<Add>", dump)
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(float(lines[-1]), 1000.0, proc.stdout)
+
     def test_module_method_hir_uses_null_self_vectorcall(self) -> None:
         # Regression guard:
         # module LOAD_METHOD shapes on 3.14 should simplify to callable-only

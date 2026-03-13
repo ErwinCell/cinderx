@@ -11,6 +11,7 @@
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
+#include "cinderx/Jit/hir/float_accumulator_promotion.h"
 #include "cinderx/Jit/hir/float_compare_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
 #include "cinderx/Jit/hir/hir_stats.h"
@@ -94,6 +95,7 @@ void Compiler::runPasses(
   auto runSimplifyPassesIfEnabled = [&]() {
     if (config & PassConfig::kSimplify) {
       runPass(hir::Simplify{}, irfunc, callback);
+      runPass(hir::FloatAccumulatorPromotion{}, irfunc, callback);
       runPass(hir::SlotVersionGuardElimination{}, irfunc, callback);
       runPass(hir::PrimitiveUnboxCSE{}, irfunc, callback);
     }
