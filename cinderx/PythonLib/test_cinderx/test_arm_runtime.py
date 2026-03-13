@@ -1265,6 +1265,64 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIn("DoubleBinaryOp<Subtract>", dump)
             self.assertIn("DoubleBinaryOp<Multiply>", dump)
 
+    def test_float_pow_two_lowers_to_double_multiply(self) -> None:
+        # Regression guard:
+        # exact-float `x ** 2` should strength-reduce to the same unboxed
+        # multiply path as `x * x`.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def square_pow(x):
+                return x ** 2
+
+            def square_mul(x):
+                return x * x
+
+            for _ in range(10000):
+                square_pow(3.14)
+                square_mul(3.14)
+
+            assert jit.force_compile(square_pow)
+            assert jit.force_compile(square_mul)
+            print(square_pow(2.718))
+            print(square_mul(2.718))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/float_pow_two_double_multiply.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPFINALHIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            self.assertIn("DoubleBinaryOp<Multiply>", dump)
+            self.assertNotIn("FloatBinaryOp<Power>", dump)
+            self.assertNotIn("BinaryOp<Power>", dump)
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(float(lines[-2]), float(lines[-1]), proc.stdout)
+
     def test_int_initialized_float_accumulator_avoids_repeated_deopts(self) -> None:
         # Regression guard:
         # `s = 0` followed by `s += float_value` in a hot loop should not
