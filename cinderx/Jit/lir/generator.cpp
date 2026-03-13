@@ -1765,6 +1765,15 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
               instr->right(),
               instr->left());
         } else if (
+            instr->left()->type() <= TLongExact &&
+            instr->right()->type() <= TLongExact) {
+          call_instr = bbb.appendCallInstruction(
+              instr->output(),
+              PyObject_RichCompareBool,
+              instr->left(),
+              instr->right(),
+              static_cast<int>(instr->op()));
+        } else if (
             (instr->op() == CompareOp::kEqual ||
              instr->op() == CompareOp::kNotEqual) &&
             (instr->left()->type() <= TUnicodeExact ||

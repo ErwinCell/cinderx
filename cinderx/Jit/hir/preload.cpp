@@ -2,6 +2,7 @@
 
 #include "cinderx/Jit/hir/preload.h"
 
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/dict.h"
 #include "cinderx/Common/extra-py-flags.h"
 #include "cinderx/Common/util.h"
@@ -10,13 +11,83 @@
 #include "cinderx/StaticPython/classloader.h"
 #include "cinderx/StaticPython/strictmoduleobject.h"
 #include "cinderx/StaticPython/vtable_builder.h"
+#include "cinderx/UpstreamBorrow/borrowed.h"
 #include "cinderx/module_state.h"
 
+#include <cstring>
+#include <cctype>
+#include <string_view>
 #include <utility>
 
 namespace jit::hir {
 
 namespace {
+
+static std::optional<OwnedType> infer_method_self_type_candidate(
+    BorrowedRef<PyCodeObject> code,
+    BorrowedRef<PyDictObject> globals) {
+  if (code->co_argcount < 1 || !PyUnicode_CheckExact(code->co_qualname)) {
+    return std::nullopt;
+  }
+
+  BorrowedRef<> arg0_name_obj{jit::getVarname(code, 0)};
+  if (!PyUnicode_CheckExact(arg0_name_obj)) {
+    return std::nullopt;
+  }
+  const char* arg0_name = PyUnicode_AsUTF8(arg0_name_obj);
+  if (arg0_name == nullptr || std::strcmp(arg0_name, "self") != 0) {
+    PyErr_Clear();
+    return std::nullopt;
+  }
+
+  const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+  if (qualname == nullptr) {
+    PyErr_Clear();
+    return std::nullopt;
+  }
+  std::string_view qualname_view{qualname};
+  std::size_t dot = qualname_view.find('.');
+  if (
+      dot == std::string_view::npos || dot == 0 ||
+      qualname_view.rfind('.') != dot ||
+      qualname_view.find('<') != std::string_view::npos) {
+    return std::nullopt;
+  }
+
+  std::string owner_name{qualname_view.substr(0, dot)};
+  BorrowedRef<> owner_obj{PyDict_GetItemString(globals, owner_name.c_str())};
+  if (owner_obj == nullptr || !PyType_Check(owner_obj)) {
+    return std::nullopt;
+  }
+  auto owner_type = reinterpret_cast<PyTypeObject*>(owner_obj.get());
+
+  PyObject* subclasses = reinterpret_cast<PyObject*>(owner_type->tp_subclasses);
+#if PY_VERSION_HEX >= 0x030C0000
+  if (owner_type->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN) {
+    PyInterpreterState* interp = PyInterpreterState_Get();
+    if (interp == nullptr) {
+      PyErr_Clear();
+      return std::nullopt;
+    }
+    managed_static_type_state* state =
+        Cix_PyStaticType_GetState(interp, owner_type);
+    if (state == nullptr) {
+      return std::nullopt;
+    }
+    subclasses = state->tp_subclasses;
+  }
+#endif
+  if (subclasses != nullptr) {
+    if (!PyDict_Check(subclasses) || PyDict_Size(subclasses) != 0) {
+      return std::nullopt;
+    }
+  }
+
+  return OwnedType{
+      Ref<PyTypeObject>::create(owner_type),
+      false,
+      true};
+}
 
 static OwnedType resolve_type_descr(BorrowedRef<> descr) {
   int optional, exact;
@@ -259,6 +330,13 @@ Type Preloader::checkArgType(long local_idx) const {
   return map_get(check_arg_types_, local_idx, TObject);
 }
 
+std::optional<Type> Preloader::inferredSelfType() const {
+  if (!inferred_self_type_) {
+    return std::nullopt;
+  }
+  return inferred_self_type_->toHir();
+}
+
 PyObject** Preloader::getGlobalCache(BorrowedRef<> name_obj) const {
   JIT_DCHECK(
       canCacheGlobals(),
@@ -293,6 +371,7 @@ std::unique_ptr<Function> Preloader::makeFunction() const {
   irfunc->return_type = return_type_;
   irfunc->has_primitive_args = has_primitive_args_;
   irfunc->has_primitive_first_arg = has_primitive_first_arg_;
+  irfunc->inferred_self_type = inferredSelfType();
   for (auto& [local, preloaded_type] : check_arg_pytypes_) {
     irfunc->typed_args.emplace_back(
         local,
@@ -313,6 +392,8 @@ bool Preloader::preload() {
   if (is_static && !preloadStatic()) {
     return false;
   }
+
+  inferred_self_type_ = infer_method_self_type_candidate(code_, globals_);
 
   jit::BytecodeInstructionBlock bc_instrs{code_};
   for (auto bc_instr : bc_instrs) {

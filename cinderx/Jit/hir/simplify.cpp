@@ -8,8 +8,10 @@
 #include "cinderx/Common/log.h"
 #include "cinderx/Common/property.h"
 #include "cinderx/Common/py-portability.h"
+#include "cinderx/Common/code.h"
 #include "cinderx/Common/type.h"
 #include "cinderx/Jit/context.h"
+#include "cinderx/Jit/bytecode.h"
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/clean_cfg.h"
 #include "cinderx/Jit/hir/copy_propagation.h"
@@ -233,6 +235,16 @@ struct Env {
     return emitRawInstr<Phi>(output, args);
   }
 };
+
+static void replaceDominatedUsesAfterInstr(
+    Function& func,
+    Instr& instr,
+    Register* orig,
+    Register* replacement);
+
+static Register* simplifyCondBranchTinyBoolMethodRefinement(
+    Env& env,
+    const CondBranch* instr);
 
 bool isRegisterUsed(const Function& func, const Register* reg) {
   for (const auto& block : func.cfg.blocks) {
@@ -626,6 +638,11 @@ Register* simplifyCompare(Env& env, const Compare* instr) {
 }
 
 Register* simplifyCondBranch(Env& env, const CondBranch* instr) {
+  if (Register* result =
+          simplifyCondBranchTinyBoolMethodRefinement(env, instr)) {
+    return result;
+  }
+
   Register* cond = instr->GetOperand(0);
   Type cond_type = cond->type();
   // Constant condition folds into an unconditional jump.
@@ -686,6 +703,17 @@ Register* simplifyIsTruthy(Env& env, const IsTruthy* instr) {
       // we don't lose any associated type checks
       env.emit<UseType>(instr->GetOperand(0), ty);
       return env.emit<LoadConst>(Type::fromCBool(res));
+    }
+  }
+  Register* modeled_input = modelReg(instr->GetOperand(0));
+  if (modeled_input->instr()->IsLongCompare()) {
+    BasicBlock* block = instr->block();
+    if (block != nullptr && !block->empty() && block->back().IsCondBranch() &&
+        block->back().GetOperand(0) == instr->output()) {
+      // Leave LongCompare -> IsTruthy intact so DynamicComparisonElimination
+      // can fuse the branch predicate into a bool-producing compare and avoid
+      // allocating a temporary PyBool object.
+      return nullptr;
     }
   }
   if (ty <= TBool) {
@@ -1332,9 +1360,10 @@ Register* simplifyUnbox(Env& env, const Instr* instr) {
 
 #if PY_VERSION_HEX >= 0x030E0000
 
+template <typename LoadAttrT>
 Register* simplifyLoadAttrSplitDict(
     Env& env,
-    const LoadAttr* load_attr,
+    const LoadAttrT* load_attr,
     BorrowedRef<PyTypeObject> type,
     BorrowedRef<PyUnicodeObject> name) {
 #ifdef Py_GIL_DISABLED
@@ -1403,9 +1432,10 @@ Register* simplifyLoadAttrSplitDict(
 // - The receiver has a known, exact type.
 // - The type has a valid version tag.
 // - The type doesn't have a descriptor at the attribute name.
+template <typename LoadAttrT>
 Register* simplifyLoadAttrSplitDict(
     Env& env,
-    const LoadAttr* load_attr,
+    const LoadAttrT* load_attr,
     BorrowedRef<PyTypeObject> type,
     BorrowedRef<PyUnicodeObject> name) {
 
@@ -1653,9 +1683,10 @@ bool simplifyStoreAttrMemberDescr(
 
 // Attempt to handle LOAD_ATTR cases where the load is a common case for object
 // instances (not types).
+template <typename LoadAttrT>
 Register* simplifyLoadAttrInstanceReceiver(
     Env& env,
-    const LoadAttr* load_attr) {
+    const LoadAttrT* load_attr) {
   Register* receiver = load_attr->GetOperand(0);
   Type type = receiver->type();
   BorrowedRef<PyTypeObject> py_type{type.runtimePyType()};
@@ -1700,7 +1731,8 @@ Register* simplifyLoadAttrInstanceReceiver(
   return nullptr;
 }
 
-Register* simplifyLoadAttrTypeReceiver(Env& env, const LoadAttr* load_attr) {
+template <typename LoadAttrT>
+Register* simplifyLoadAttrTypeReceiver(Env& env, const LoadAttrT* load_attr) {
   Register* receiver = load_attr->GetOperand(0);
   if (!receiver->isA(TType)) {
     return nullptr;
@@ -1752,6 +1784,16 @@ Register* simplifyLoadAttr(Env& env, const LoadAttr* load_attr) {
         load_attr->GetOperand(0),
         load_attr->name_idx(),
         *load_attr->frameState());
+  }
+  return nullptr;
+}
+
+Register* simplifyLoadAttrCached(Env& env, const LoadAttrCached* load_attr) {
+  if (Register* reg = simplifyLoadAttrInstanceReceiver(env, load_attr)) {
+    return reg;
+  }
+  if (Register* reg = simplifyLoadAttrTypeReceiver(env, load_attr)) {
+    return reg;
   }
   return nullptr;
 }
@@ -1864,6 +1906,399 @@ static bool isBuiltin(Register* callable, const char* name) {
     return isBuiltin(meth->d_method, name);
   }
   return false;
+}
+
+enum class TinyMethodResult {
+  kReturnSelf,
+  kReturnTrue,
+  kReturnFalse,
+};
+
+struct TinyMethodCandidate {
+  BorrowedRef<PyTypeObject> type;
+  TinyMethodResult result;
+};
+
+struct TinyBoolMethodBranchTypes {
+  BorrowedRef<PyTypeObject> true_type;
+  BorrowedRef<PyTypeObject> false_type;
+};
+
+struct ReceiverAttrUseSite {
+  BasicBlock* block;
+  Instr* instr;
+};
+
+static bool isSelfLoadOpcode(int opcode) {
+  switch (opcode) {
+    case LOAD_FAST:
+    case LOAD_FAST_BORROW:
+    case LOAD_FAST_CHECK:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static std::optional<TinyMethodResult> classifyTinyInstanceMethod(
+    BorrowedRef<PyFunctionObject> func) {
+  BorrowedRef<PyCodeObject> code{func->func_code};
+  if (
+      code->co_argcount != 1 || code->co_kwonlyargcount != 0 ||
+      (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) != 0) {
+    return std::nullopt;
+  }
+
+  BorrowedRef<> arg0_name_obj{jit::getVarname(code, 0)};
+  if (!PyUnicode_CheckExact(arg0_name_obj)) {
+    return std::nullopt;
+  }
+  const char* arg0_name = PyUnicode_AsUTF8(arg0_name_obj);
+  if (arg0_name == nullptr || std::strcmp(arg0_name, "self") != 0) {
+    PyErr_Clear();
+    return std::nullopt;
+  }
+
+  std::vector<BytecodeInstruction> body;
+  for (auto bc_instr : BytecodeInstructionBlock{code}) {
+    if (bc_instr.opcode() == RESUME) {
+      continue;
+    }
+    body.push_back(bc_instr);
+  }
+
+  if (body.size() == 2 && isSelfLoadOpcode(body[0].opcode()) &&
+      body[0].oparg() == 0 && body[1].opcode() == RETURN_VALUE) {
+    return TinyMethodResult::kReturnSelf;
+  }
+
+  auto classify_const = [&](BorrowedRef<> value) -> std::optional<TinyMethodResult> {
+    if (value == Py_True) {
+      return TinyMethodResult::kReturnTrue;
+    }
+    if (value == Py_False) {
+      return TinyMethodResult::kReturnFalse;
+    }
+    return std::nullopt;
+  };
+
+  if (body.size() == 1 && body[0].opcode() == RETURN_CONST) {
+    BorrowedRef<> constant{PyTuple_GET_ITEM(code->co_consts, body[0].oparg())};
+    return classify_const(constant);
+  }
+
+  if (body.size() == 2 && body[0].opcode() == LOAD_CONST &&
+      body[1].opcode() == RETURN_VALUE) {
+    BorrowedRef<> constant{PyTuple_GET_ITEM(code->co_consts, body[0].oparg())};
+    return classify_const(constant);
+  }
+
+  return std::nullopt;
+}
+
+static std::vector<TinyMethodCandidate> findTinyMethodCandidates(
+    BorrowedRef<PyDictObject> globals,
+    BorrowedRef<PyUnicodeObject> method_name) {
+  std::vector<TinyMethodCandidate> candidates;
+  ThreadedCompileSerialize guard;
+  PyObject* key = nullptr;
+  PyObject* value = nullptr;
+  Py_ssize_t pos = 0;
+  while (PyDict_Next(globals, &pos, &key, &value)) {
+    if (!PyType_Check(value)) {
+      continue;
+    }
+    BorrowedRef<PyTypeObject> type{reinterpret_cast<PyTypeObject*>(value)};
+    BorrowedRef<> method = typeLookupSafe(type, method_name);
+    if (method == nullptr || !PyFunction_Check(method)) {
+      continue;
+    }
+    auto result = classifyTinyInstanceMethod(
+        reinterpret_cast<PyFunctionObject*>(method.get()));
+    if (!result.has_value()) {
+      continue;
+    }
+    candidates.push_back({type, *result});
+  }
+  return candidates;
+}
+
+static std::optional<TinyBoolMethodBranchTypes> findTinyBoolMethodBranchTypes(
+    BorrowedRef<PyDictObject> globals,
+    BorrowedRef<PyUnicodeObject> method_name) {
+  auto candidates = findTinyMethodCandidates(globals, method_name);
+  std::optional<BorrowedRef<PyTypeObject>> true_type;
+  std::optional<BorrowedRef<PyTypeObject>> false_type;
+  for (const auto& candidate : candidates) {
+    switch (candidate.result) {
+      case TinyMethodResult::kReturnTrue:
+        if (true_type.has_value()) {
+          return std::nullopt;
+        }
+        true_type = candidate.type;
+        break;
+      case TinyMethodResult::kReturnFalse:
+        if (false_type.has_value()) {
+          return std::nullopt;
+        }
+        false_type = candidate.type;
+        break;
+      case TinyMethodResult::kReturnSelf:
+        break;
+    }
+  }
+  if (!true_type.has_value() || !false_type.has_value()) {
+    return std::nullopt;
+  }
+  return TinyBoolMethodBranchTypes{*true_type, *false_type};
+}
+
+static void replaceDominatedUsesAfterInstr(
+    Function& func,
+    Instr& instr,
+    Register* orig,
+    Register* replacement) {
+  DominatorAnalysis dom{func};
+  BasicBlock* block = instr.block();
+  bool after_instr = false;
+  for (Instr& current : *block) {
+    if (after_instr) {
+      current.ReplaceUsesOf(orig, replacement);
+    }
+    if (&current == &instr) {
+      after_instr = true;
+    }
+  }
+
+  for (const BasicBlock* dominated : dom.getBlocksDominatedBy(block)) {
+    if (dominated == block) {
+      continue;
+    }
+    for (Instr& current : *const_cast<BasicBlock*>(dominated)) {
+      current.ReplaceUsesOf(orig, replacement);
+    }
+  }
+}
+
+static bool hasDominatedAttrUseAfterInstr(
+    Function& func,
+    Instr& instr,
+    Register* reg) {
+  DominatorAnalysis dom{func};
+  BasicBlock* block = instr.block();
+  bool after_instr = false;
+  for (Instr& current : *block) {
+    if (after_instr && (current.IsLoadAttr() || current.IsLoadAttrCached())) {
+      for (size_t i = 0; i < current.NumOperands(); i++) {
+        if (current.GetOperand(i) == reg) {
+          return true;
+        }
+      }
+    }
+    if (&current == &instr) {
+      after_instr = true;
+    }
+  }
+
+  for (const BasicBlock* dominated : dom.getBlocksDominatedBy(block)) {
+    if (dominated == block) {
+      continue;
+    }
+    for (const Instr& current : *dominated) {
+      if (!current.IsLoadAttr() && !current.IsLoadAttrCached()) {
+        continue;
+      }
+      for (size_t i = 0; i < current.NumOperands(); i++) {
+        if (current.GetOperand(i) == reg) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+static bool isReceiverAttrUse(const Instr& instr, Register* reg) {
+  if (!instr.IsLoadAttr() && !instr.IsLoadAttrCached()) {
+    return false;
+  }
+  for (size_t i = 0; i < instr.NumOperands(); i++) {
+    if (instr.GetOperand(i) == reg) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::optional<ReceiverAttrUseSite> findSingleEntryReceiverAttrUseSite(
+    Function& func,
+    BasicBlock* branch_entry,
+    Register* receiver) {
+  DominatorAnalysis dom{func};
+  const auto& branch_dom = dom.getBlocksDominatedBy(branch_entry);
+
+  std::optional<ReceiverAttrUseSite> first_site;
+  std::vector<BasicBlock*> use_blocks;
+  for (auto& block : func.cfg.blocks) {
+    if (!branch_dom.contains(&block)) {
+      continue;
+    }
+    for (Instr& instr : block) {
+      if (!isReceiverAttrUse(instr, receiver)) {
+        continue;
+      }
+      if (!first_site.has_value()) {
+        first_site = ReceiverAttrUseSite{&block, &instr};
+      }
+      use_blocks.push_back(&block);
+      break;
+    }
+  }
+
+  if (!first_site.has_value()) {
+    return std::nullopt;
+  }
+
+  const auto& first_dom = dom.getBlocksDominatedBy(first_site->block);
+  for (BasicBlock* use_block : use_blocks) {
+    if (use_block != first_site->block && !first_dom.contains(use_block)) {
+      return std::nullopt;
+    }
+  }
+  return first_site;
+}
+
+static bool refineReceiverInBranchFromTinyBoolMethod(
+    Env& env,
+    BasicBlock* branch_entry,
+    Register* receiver,
+    BorrowedRef<PyTypeObject> receiver_type) {
+  auto site = findSingleEntryReceiverAttrUseSite(env.func, branch_entry, receiver);
+  if (!site.has_value()) {
+    return false;
+  }
+
+  auto* deopt = site->instr->asDeoptBase();
+  if (deopt == nullptr || deopt->frameState() == nullptr) {
+    return false;
+  }
+
+  BasicBlock* saved_block = env.block;
+  auto saved_cursor = env.cursor;
+  BCOffset saved_bc_off = env.bc_off;
+  bool saved_optimized = env.optimized;
+
+  env.block = site->block;
+  env.cursor = site->block->iterator_to(*site->instr);
+  env.bc_off = site->instr->bytecodeOffset();
+  Register* guarded_receiver = env.emit<GuardType>(
+      Type::fromTypeExact(receiver_type), receiver, *deopt->frameState());
+
+  env.block = saved_block;
+  env.cursor = saved_cursor;
+  env.bc_off = saved_bc_off;
+  env.optimized = saved_optimized;
+
+  replaceDominatedUsesAfterInstr(
+      env.func, *guarded_receiver->instr(), receiver, guarded_receiver);
+  return true;
+}
+
+static Register* simplifyCondBranchTinyBoolMethodRefinement(
+    Env& env,
+    const CondBranch* instr) {
+  Register* cond = instr->GetOperand(0);
+  if (!cond->instr()->IsIsTruthy()) {
+    return nullptr;
+  }
+
+  auto* is_truthy = static_cast<const IsTruthy*>(cond->instr());
+  Register* value = is_truthy->GetOperand(0);
+  if (!value->instr()->IsCallMethod()) {
+    return nullptr;
+  }
+
+  auto* call = static_cast<const CallMethod*>(value->instr());
+  if (call->NumArgs() != 0) {
+    return nullptr;
+  }
+
+  Register* target = modelReg(call->func());
+  if (!isLoadMethodBase(*target->instr())) {
+    return nullptr;
+  }
+
+  auto* load_method = static_cast<const LoadMethodBase*>(target->instr());
+  BorrowedRef<PyCodeObject> code = env.func.codeFor(*load_method);
+  if (code == nullptr) {
+    return nullptr;
+  }
+
+  BorrowedRef<PyUnicodeObject> method_name{
+      PyTuple_GET_ITEM(code->co_names, load_method->name_idx())};
+  auto branch_types = findTinyBoolMethodBranchTypes(
+      BorrowedRef<PyDictObject>{env.func.globals}, method_name);
+  if (!branch_types.has_value()) {
+    return nullptr;
+  }
+
+  Register* receiver = load_method->receiver();
+  bool changed = false;
+  changed |= refineReceiverInBranchFromTinyBoolMethod(
+      env, instr->true_bb(), receiver, branch_types->true_type);
+  changed |= refineReceiverInBranchFromTinyBoolMethod(
+      env, instr->false_bb(), receiver, branch_types->false_type);
+  if (!changed) {
+    return nullptr;
+  }
+
+  return env.emit<CondBranch>(cond, instr->true_bb(), instr->false_bb());
+}
+
+static Register* simplifyCallMethodTinyReturnSelf(
+    Env& env,
+    const CallMethod* instr) {
+  if (instr->NumArgs() != 0) {
+    return nullptr;
+  }
+
+  Register* target = modelReg(instr->func());
+  if (!isLoadMethodBase(*target->instr())) {
+    return nullptr;
+  }
+  auto load_method = static_cast<const LoadMethodBase*>(target->instr());
+  BorrowedRef<PyCodeObject> code = env.func.codeFor(*load_method);
+  if (code == nullptr) {
+    return nullptr;
+  }
+  BorrowedRef<PyUnicodeObject> method_name{
+      PyTuple_GET_ITEM(code->co_names, load_method->name_idx())};
+  auto candidates = findTinyMethodCandidates(
+      BorrowedRef<PyDictObject>{env.func.globals}, method_name);
+  std::optional<BorrowedRef<PyTypeObject>> candidate_type;
+  for (const auto& candidate : candidates) {
+    if (candidate.result != TinyMethodResult::kReturnSelf) {
+      continue;
+    }
+    if (candidate_type.has_value()) {
+      return nullptr;
+    }
+    candidate_type = candidate.type;
+  }
+  if (!candidate_type.has_value()) {
+    return nullptr;
+  }
+
+  Register* receiver = load_method->receiver();
+  if (!hasDominatedAttrUseAfterInstr(
+          env.func, *const_cast<CallMethod*>(instr), receiver)) {
+    return nullptr;
+  }
+  Register* guarded_receiver = env.emit<GuardType>(
+      Type::fromTypeExact(*candidate_type), receiver, *instr->frameState());
+  replaceDominatedUsesAfterInstr(
+      env.func, *const_cast<CallMethod*>(instr), receiver, guarded_receiver);
+  return env.emit<Assign>(guarded_receiver);
 }
 
 static BorrowedRef<PyDictObject> getKnownModuleDict(BorrowedRef<> obj) {
@@ -2125,6 +2560,10 @@ static Register* resolveArgs(
 }
 
 Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
+  if (Register* result = simplifyCallMethodTinyReturnSelf(env, instr)) {
+    return result;
+  }
+
   // If this is statically known to be trying to call a function, update to
   // using a VectorCall directly.
   if constexpr (PY_VERSION_HEX >= 0x030E0000) {
@@ -2487,6 +2926,9 @@ Register* simplifyInstr(Env& env, const Instr* instr) {
     case Opcode::kLoadAttr:
       return simplifyLoadAttr(env, static_cast<const LoadAttr*>(instr));
 #endif
+    case Opcode::kLoadAttrCached:
+      return simplifyLoadAttrCached(
+          env, static_cast<const LoadAttrCached*>(instr));
 // TODO(T255263721) - Enable this again. See P2169673579 and P2184559031.
 #ifndef Py_GIL_DISABLED
     case Opcode::kLoadMethod:

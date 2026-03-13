@@ -295,6 +295,276 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 2000, proc.stdout)
 
+    def test_inferred_self_type_guard_deopts_on_subclass_instance(self) -> None:
+        # Regression guard:
+        # inferred exact-self typing should install an entry GuardType for
+        # normal Python methods, so later subclass instances deopt safely.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Point:
+                def __init__(self, x):
+                    self.x = x
+
+                def getx(self):
+                    return self.x
+
+            p = Point(1)
+            for _ in range(20000):
+                p.getx()
+
+            assert jit.force_compile(Point.getx)
+            counts = cinderjit.get_function_hir_opcode_counts(Point.getx)
+            print(counts.get("GuardType", 0))
+
+            class Sub(Point):
+                pass
+
+            q = Sub(2)
+            jit.get_and_clear_runtime_stats()
+            print(q.getx())
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Point.getx"
+            )
+            print(deopt_count)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/inferred_self_type_guard.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 2, proc.stdout)
+            self.assertGreaterEqual(int(lines[-1]), 1, proc.stdout)
+
+    def test_nested_class_methods_do_not_infer_self_exact_type(self) -> None:
+        # Regression guard:
+        # only top-level Class.method qualnames should infer exact-self typing;
+        # nested classes must not misinfer Outer as the receiver type.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Outer:
+                class Inner:
+                    def __init__(self, x):
+                        self.x = x
+
+                    def getx(self):
+                        return self.x
+
+            obj = Outer.Inner(7)
+            for _ in range(20000):
+                obj.getx()
+
+            assert jit.force_compile(Outer.Inner.getx)
+            counts = cinderjit.get_function_hir_opcode_counts(Outer.Inner.getx)
+            print(counts.get("GuardType", 0))
+            print(obj.getx())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/nested_class_self_inference.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 7, proc.stdout)
+
+    def test_tiny_return_self_method_refines_receiver_after_guard(self) -> None:
+        # Regression guard:
+        # a zero-arg helper that trivially returns self should let the JIT
+        # install an exact-type guard and refine later receiver field loads.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Vector:
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def mustBeVector(self):
+                    return self
+
+            def dot(a, b):
+                b.mustBeVector()
+                return (a.x * b.x) + (a.y * b.y) + (a.z * b.z)
+
+            u = Vector(1.0, 2.0, 3.0)
+            v = Vector(4.0, 5.0, 6.0)
+            for _ in range(20000):
+                dot(u, v)
+
+            assert jit.force_compile(dot)
+            counts = cinderjit.get_function_hir_opcode_counts(dot)
+            print(counts.get("GuardType", 0))
+            print(counts.get("LoadField", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(dot(u, v))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tiny_return_self_refines_receiver.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 6, proc.stdout)
+            self.assertLessEqual(int(lines[-2]), 3, proc.stdout)
+            self.assertEqual(float(lines[-1]), 32.0, proc.stdout)
+
+    def test_tiny_bool_method_refines_branch_receiver_fields(self) -> None:
+        # Regression guard:
+        # a zero-arg helper that returns constant bool should let the JIT
+        # refine the receiver type within the taken branch and lower later
+        # attribute reads to field paths.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Vector:
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def isPoint(self):
+                    return False
+
+            class Point:
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def isPoint(self):
+                    return True
+
+                def diff(self, other):
+                    if other.isPoint():
+                        return (
+                            (self.x - other.x)
+                            + (self.y - other.y)
+                            + (self.z - other.z)
+                        )
+                    return (
+                        (self.x - other.x)
+                        + (self.y - other.y)
+                        + (self.z - other.z)
+                    )
+
+            p = Point(10.0, 20.0, 30.0)
+            q = Point(1.0, 2.0, 3.0)
+            v = Vector(4.0, 5.0, 6.0)
+            for _ in range(20000):
+                p.diff(q)
+                p.diff(v)
+
+            assert jit.force_compile(Point.diff)
+            counts = cinderjit.get_function_hir_opcode_counts(Point.diff)
+            print(counts.get("GuardType", 0))
+            print(counts.get("LoadField", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(counts.get("CallMethod", 0))
+            print(p.diff(q))
+            print(p.diff(v))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tiny_bool_branch_refines_receiver.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 18, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(float(lines[-2]), 54.0, proc.stdout)
+            self.assertEqual(float(lines[-1]), 45.0, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

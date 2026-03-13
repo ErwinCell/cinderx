@@ -54,6 +54,11 @@ class Function {
   // in argument order, may have gaps for unchecked args
   std::vector<TypedArgument> typed_args;
 
+  // Candidate exact type for the first "self" argument of an inferred
+  // instance method. This is metadata only; codegen must not rely on it
+  // without additional subclass-safety validation.
+  std::optional<Type> inferred_self_type;
+
   // Return type
   Type return_type{TObject};
 

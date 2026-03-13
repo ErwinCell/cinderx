@@ -620,6 +620,22 @@ std::unique_ptr<Function> HIRBuilder::buildHIR() {
 // check and see if there is any annotation to guard against.
 void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
   AnnotationIndex* index = preloader_.annotations();
+  bool first = true;
+  auto emit_arg_guard = [&](int arg_idx, Type type) {
+    if (first) {
+      first = false;
+      tc.frame.cur_instr_offs = BCOffset(0);
+      tc.emitSnapshot();
+    }
+
+    auto arg = tc.frame.localsplus.at(arg_idx);
+    JIT_CHECK(arg != nullptr, "No register for argument {}", arg_idx);
+    tc.emit<GuardType>(arg, type, arg);
+  };
+
+  if (auto inferred_self_type = preloader_.inferredSelfType()) {
+    emit_arg_guard(0, *inferred_self_type);
+  }
 
   // Bail out if there are no annotations.
   if (!index) {
@@ -627,7 +643,6 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
   }
 
   PyCodeObject* const code = tc.frame.code;
-  bool first = true;
   bool full_annotation_guards = getConfig().emit_type_annotation_guards;
 
   auto should_emit_builtin_specialization_guard = [](PyObject* annotation) {
@@ -654,27 +669,9 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
       continue;
     }
 
-    // If we have an annotation that we are going to guard against, we need to
-    // emit a snapshot for the guard.
-    //
-    // It's likely that no bytecode instructions have been compiled yet, meaning
-    // the instruction offset has not yet been set. Setting it to zero here
-    // ensures that if we need to deopt that it starts executing the first
-    // instruction.
-    if (first) {
-      first = false;
-      tc.frame.cur_instr_offs = BCOffset(0);
-      tc.emitSnapshot();
-    }
-
-    // Now guard against the type of the argument.
-    auto arg = tc.frame.localsplus.at(arg_idx);
-    JIT_CHECK(arg != nullptr, "No register for argument {}", arg_idx);
-
-    Type type =
-        Type::fromTypeExact(reinterpret_cast<PyTypeObject*>(annotation));
-
-    tc.emit<GuardType>(arg, type, arg);
+    emit_arg_guard(
+        arg_idx,
+        Type::fromTypeExact(reinterpret_cast<PyTypeObject*>(annotation)));
   }
 }
 
