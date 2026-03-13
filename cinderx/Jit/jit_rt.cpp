@@ -1461,6 +1461,10 @@ void JITRT_SetU64_InArray(char* arr, uint64_t val, int64_t idx) {
   ((uint64_t*)arr)[idx] = (uint64_t)val;
 }
 
+void JITRT_SetDouble_InArray(char* arr, double_t val, int64_t idx) {
+  ((double_t*)arr)[idx] = val;
+}
+
 void JITRT_SetObj_InArray(char* arr, uint64_t val, int64_t idx) {
   ((PyObject**)arr)[idx] = (PyObject*)val;
 }

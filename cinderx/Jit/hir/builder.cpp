@@ -21,6 +21,7 @@
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/hir/type.h"
+#include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/StaticPython/checked_dict.h"
 #include "cinderx/StaticPython/checked_list.h"
 #include "cinderx/StaticPython/classloader.h"
@@ -75,6 +76,44 @@ std::optional<Type> getLoadGlobalGuardType(BorrowedRef<> value) {
     return std::nullopt;
   }
   return exact_type;
+}
+
+struct StdlibArrayDescr {
+  char typecode;
+  int itemsize;
+};
+
+struct StdlibArrayObject {
+  PyObject_VAR_HEAD
+  char* ob_item;
+  Py_ssize_t allocated;
+  const StdlibArrayDescr* ob_descr;
+  PyObject* weakreflist;
+  Py_ssize_t ob_exports;
+};
+
+BorrowedRef<PyTypeObject> getStdlibArrayType() {
+  static Ref<PyTypeObject> array_type;
+  if (array_type != nullptr) {
+    return array_type;
+  }
+
+  ThreadedCompileSerialize guard;
+  Ref<> mod = Ref<>::steal(PyImport_ImportModule("array"));
+  if (mod == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+
+  Ref<> type = Ref<>::steal(PyObject_GetAttrString(mod, "array"));
+  if (type == nullptr || !PyType_Check(type)) {
+    PyErr_Clear();
+    return nullptr;
+  }
+
+  array_type =
+      Ref<PyTypeObject>::steal(reinterpret_cast<PyTypeObject*>(type.release()));
+  return array_type;
 }
 
 // Check that an opcode is one we know how to translate into HIR.
@@ -1312,7 +1351,7 @@ void HIRBuilder::translate(
           break;
         }
         case STORE_SUBSCR: {
-          emitStoreSubscr(tc, bc_instr);
+          emitStoreSubscr(irfunc.cfg, tc, bc_instr);
           break;
         }
         case BUILD_SLICE: {
@@ -4219,12 +4258,94 @@ void HIRBuilder::emitStoreSlice(TranslationContext& tc) {
 }
 
 void HIRBuilder::emitStoreSubscr(
+    CFG& cfg,
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
   auto& stack = tc.frame.stack;
   Register* sub = stack.pop();
   Register* container = stack.pop();
   Register* value = stack.pop();
+
+  if (getConfig().specialized_opcodes) {
+    BorrowedRef<PyTypeObject> array_type = getStdlibArrayType();
+    if (array_type != nullptr) {
+      BasicBlock* fast_path = cfg.AllocateBlock();
+      BasicBlock* long_index_path = cfg.AllocateBlock();
+      BasicBlock* float_value_path = cfg.AllocateBlock();
+      BasicBlock* slow_path = cfg.AllocateBlock();
+      BasicBlock* double_store_path = cfg.AllocateBlock();
+      BasicBlock* done_path = cfg.AllocateBlock();
+      tc.emit<CondBranchCheckType>(
+          container,
+          Type::fromTypeExact(array_type),
+          fast_path,
+          slow_path);
+
+      tc.block = fast_path;
+      tc.emit<CondBranchCheckType>(sub, TLongExact, long_index_path, slow_path);
+
+      tc.block = long_index_path;
+      tc.emit<RefineType>(sub, TLongExact, sub);
+      Register* unboxed_idx = temps_.AllocateStack();
+      unboxPrimitive(tc, unboxed_idx, sub, TCInt64);
+
+      tc.emit<CondBranchCheckType>(
+          value, TFloatExact, float_value_path, slow_path);
+
+      tc.block = float_value_path;
+      tc.emit<RefineType>(value, TFloatExact, value);
+      Register* unboxed_value = temps_.AllocateStack();
+      unboxPrimitive(tc, unboxed_value, value, TCDouble);
+
+      Register* ob_descr = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          ob_descr,
+          container,
+          "ob_descr",
+          offsetof(StdlibArrayObject, ob_descr),
+          TCPtr);
+      Register* zero = temps_.AllocateStack();
+      tc.emit<LoadConst>(zero, Type::fromCInt(0, TCInt64));
+      Register* typecode = temps_.AllocateStack();
+      tc.emit<LoadArrayItem>(
+          typecode,
+          ob_descr,
+          zero,
+          container,
+          offsetof(StdlibArrayDescr, typecode),
+          TCInt8);
+      Register* expected = temps_.AllocateStack();
+      tc.emit<LoadConst>(expected, Type::fromCInt('d', TCInt8));
+      Register* matches = temps_.AllocateStack();
+      tc.emit<PrimitiveCompare>(
+          matches, PrimitiveCompareOp::kEqual, typecode, expected);
+      tc.emit<CondBranch>(matches, double_store_path, slow_path);
+
+      tc.block = double_store_path;
+      Register* adjusted_idx = temps_.AllocateStack();
+      tc.emit<CheckSequenceBounds>(adjusted_idx, container, unboxed_idx, tc.frame);
+      Register* ob_item = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          ob_item,
+          container,
+          "ob_item",
+          offsetof(StdlibArrayObject, ob_item),
+          TCPtr);
+      tc.emit<StoreArrayItem>(
+          ob_item, adjusted_idx, unboxed_value, container, TCDouble);
+      tc.emit<Branch>(done_path);
+
+      tc.block = slow_path;
+      if (bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {
+        tc.emit<GuardType>(container, TDictExact, container, tc.frame);
+      }
+      tc.emit<StoreSubscr>(container, sub, value, tc.frame);
+      tc.emit<Branch>(done_path);
+
+      tc.block = done_path;
+      return;
+    }
+  }
 
   if (getConfig().specialized_opcodes &&
       bc_instr.specializedOpcode() == STORE_SUBSCR_DICT) {

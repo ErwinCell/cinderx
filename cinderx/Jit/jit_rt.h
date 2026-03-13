@@ -366,6 +366,7 @@ void JITRT_SetI32_InArray(char* arr, uint64_t val, int64_t idx);
 void JITRT_SetU32_InArray(char* arr, uint64_t val, int64_t idx);
 void JITRT_SetI64_InArray(char* arr, uint64_t val, int64_t idx);
 void JITRT_SetU64_InArray(char* arr, uint64_t val, int64_t idx);
+void JITRT_SetDouble_InArray(char* arr, double_t val, int64_t idx);
 void JITRT_SetObj_InArray(char* arr, uint64_t val, int64_t idx);
 
 uint64_t JITRT_UnboxU64(PyObject* obj);

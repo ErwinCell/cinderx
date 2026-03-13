@@ -2498,6 +2498,15 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       case Opcode::kStoreArrayItem: {
         auto instr = static_cast<const StoreArrayItem*>(&i);
         auto type = instr->type();
+        if (type <= TCDouble) {
+          bbb.appendInvokeInstruction(
+              JITRT_SetDouble_InArray,
+              instr->ob_item(),
+              instr->value(),
+              instr->idx());
+          break;
+        }
+
         decltype(JITRT_SetI8_InArray)* func = nullptr;
 
         if (type <= TCInt8) {

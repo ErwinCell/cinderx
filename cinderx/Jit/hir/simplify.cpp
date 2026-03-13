@@ -2894,16 +2894,31 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
 }
 
 Register* simplifyStoreSubscr(Env& env, const StoreSubscr* instr) {
-  if (instr->GetOperand(0)->isA(TDictExact)) {
+  Register* container = instr->GetOperand(0);
+  Register* sub = instr->GetOperand(1);
+  Register* value = instr->GetOperand(2);
+
+  if (value->instr()->IsPrimitiveBox()) {
+    auto* box = static_cast<const PrimitiveBox*>(value->instr());
+    if (box->type() <= TCDouble && box->block() != instr->block()) {
+      Register* local_box =
+          env.emit<PrimitiveBox>(box->value(), box->type(), *box->frameState());
+      env.emit<StoreSubscr>(container, sub, local_box, *instr->frameState());
+      env.optimized = true;
+      return nullptr;
+    }
+  }
+
+  if (container->isA(TDictExact)) {
     auto output = env.func.env.AllocateRegister();
     env.emitRawInstr<CallStatic>(
         3,
         output,
         reinterpret_cast<void*>(PyDict_Type.tp_as_mapping->mp_ass_subscript),
         TCInt32,
-        instr->GetOperand(0),
-        instr->GetOperand(1),
-        instr->GetOperand(2));
+        container,
+        sub,
+        value);
 
     env.emit<CheckNeg>(output, *instr->frameState());
     return nullptr;

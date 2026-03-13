@@ -1860,6 +1860,62 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 1, proc.stdout)
             self.assertEqual(float(lines[-1]), 27.0, proc.stdout)
 
+    def test_array_double_store_lowers_to_store_array_item(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            from array import array
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(a, i):
+                a[i] = a[0] - a[1]
+
+            arr = array('d', [4.5, 1.5, 0.0])
+            for _ in range(20000):
+                f(arr, 2)
+
+            assert jit.force_compile(f)
+            f(arr, 2)
+            print(arr[2])
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/array_double_store.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "PYTHONJITDUMPFINALHIR": "1"},
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 1, proc.stdout)
+            self.assertEqual(float(lines[-1]), 3.0, proc.stdout)
+
+            dump = proc.stdout + "\n" + proc.stderr
+            self.assertIn("StoreArrayItem", dump)
+            self.assertIn("StoreSubscr", dump)
+            self.assertIn("CondBranchCheckType", dump)
+            self.assertIn("ObjectUser[array.array:Exact]", dump)
+            self.assertIn("PrimitiveBox<CDouble>", dump)
+            self.assertLess(
+                dump.index("StoreArrayItem"),
+                dump.index("PrimitiveBox<CDouble>"),
+                dump,
+            )
+
     def test_primitive_box_remat_deopt_correctness(self) -> None:
         # Regression guard:
         # when a guard later deopts, CDouble values that replaced temporary

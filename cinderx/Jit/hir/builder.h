@@ -253,6 +253,7 @@ class HIRBuilder {
   void emitBinarySlice(TranslationContext& tc);
   void emitStoreSlice(TranslationContext& tc);
   void emitStoreSubscr(
+      CFG& cfg,
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitInPlaceOp(
