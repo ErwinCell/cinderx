@@ -367,6 +367,7 @@ bool Instr::isReplayable() const {
     case Opcode::kCheckNeg:
     case Opcode::kCheckSequenceBounds:
     case Opcode::kCheckVar:
+    case Opcode::kCheckedIntBinaryOp:
     case Opcode::kCIntToCBool:
     case Opcode::kDoubleBinaryOp:
     case Opcode::kDoubleSqrt:
@@ -384,6 +385,7 @@ bool Instr::isReplayable() const {
     case Opcode::kIntBinaryOp:
     case Opcode::kIntConvert:
     case Opcode::kIsNegativeAndErrOccurred:
+    case Opcode::kLongUnboxCompact:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:
     case Opcode::kLoadCellItem:
@@ -709,6 +711,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kCallStatic:
     case Opcode::kCallStaticRetVoid:
     case Opcode::kCheckSequenceBounds:
+    case Opcode::kCheckedIntBinaryOp:
     case Opcode::kCIntToCBool:
     case Opcode::kCompare:
     case Opcode::kCompareBool:
@@ -747,6 +750,7 @@ bool isPassthrough(const Instr& instr) {
     case Opcode::kIsTruthy:
     case Opcode::kListAppend:
     case Opcode::kListExtend:
+    case Opcode::kLongUnboxCompact:
     case Opcode::kListSlice:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:

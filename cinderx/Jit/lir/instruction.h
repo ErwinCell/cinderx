@@ -436,6 +436,7 @@ class Instruction {
 // Kind of condition that a Guard instruction will execute.
 enum InstrGuardKind {
   kAlwaysFail,
+  kCompactLong,
   kHasType,
   kIs,
   kNotNegative,

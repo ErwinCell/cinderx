@@ -289,12 +289,18 @@ Type outputType(
       }
       return binop.left()->type().unspecialized();
     }
+    case Opcode::kCheckedIntBinaryOp: {
+      auto& binop = static_cast<const CheckedIntBinaryOp&>(instr);
+      return binop.left()->type().unspecialized();
+    }
     case Opcode::kDoubleBinaryOp: {
       return TCDouble;
     }
     case Opcode::kDoubleSqrt: {
       return TCDouble;
     }
+    case Opcode::kLongUnboxCompact:
+      return TCInt64;
     case Opcode::kPrimitiveCompare:
       return TCBool;
     case Opcode::kPrimitiveUnaryOp:

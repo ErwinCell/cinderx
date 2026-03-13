@@ -10,6 +10,8 @@
 #include "internal/pycore_intrinsics.h"
 #endif
 
+#include "internal/pycore_long.h"
+
 #if PY_VERSION_HEX >= 0x030D0000
 #include "internal/pycore_setobject.h"
 #endif
@@ -1019,6 +1021,28 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.appendInstr(instr->output(), op, instr->left(), instr->right());
         break;
       }
+      case Opcode::kCheckedIntBinaryOp: {
+        auto instr = static_cast<const CheckedIntBinaryOp*>(&i);
+        Instruction::Opcode op;
+        switch (instr->op()) {
+          case BinaryOpKind::kAdd:
+            op = Instruction::kAdd;
+            break;
+          case BinaryOpKind::kSubtract:
+            op = Instruction::kSub;
+            break;
+          default:
+            JIT_ABORT("Unsupported checked int binary op {}", (int)instr->op());
+        }
+        bbb.appendInstr(instr->output(), op, instr->left(), instr->right());
+        auto done_block = bbb.allocateBlock();
+        auto deopt_block = bbb.allocateBlock();
+        bbb.appendBranch(Instruction::kBranchNO, done_block);
+        bbb.appendBlock(deopt_block);
+        appendGuardAlwaysFail(bbb, *instr);
+        bbb.switchBlock(done_block);
+        break;
+      }
       case Opcode::kPrimitiveBoxBool: {
         // Boxing a boolean is a matter of selecting between Py_True and
         // Py_False.
@@ -1698,6 +1722,42 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             instr->left(),
             instr->right(),
             static_cast<int>(instr->op()));
+        break;
+      }
+      case Opcode::kLongUnboxCompact: {
+        auto instr = static_cast<const LongUnboxCompact*>(&i);
+        Instruction* value = bbb.getDefInstr(instr->value());
+        appendGuard(bbb, InstrGuardKind::kCompactLong, *instr, value);
+        auto tag = bbb.appendInstr(
+            OutVReg{OperandBase::k64bit},
+            Instruction::kMove,
+            Ind{
+                value,
+                offsetof(PyLongObject, long_value.lv_tag),
+                DataType::k64bit});
+        auto sign_bits = bbb.appendInstr(
+            OutVReg{OperandBase::k64bit},
+            Instruction::kAnd,
+            tag,
+            Imm{_PyLong_SIGN_MASK});
+        auto one = bbb.appendInstr(
+            Instruction::kMove, OutVReg{OperandBase::k64bit}, int64_t{1});
+        auto sign = bbb.appendInstr(
+            OutVReg{OperandBase::k64bit},
+            Instruction::kSub,
+            one,
+            sign_bits);
+        auto digit32 = bbb.appendInstr(
+            OutVReg{OperandBase::k32bit},
+            Instruction::kMove,
+            Ind{
+                value,
+                offsetof(PyLongObject, long_value.ob_digit),
+                DataType::k32bit});
+        auto digit =
+            bbb.appendInstr(
+                OutVReg{OperandBase::k64bit}, Instruction::kZext, digit32);
+        bbb.appendInstr(instr->output(), Instruction::kMul, digit, sign);
         break;
       }
       case Opcode::kUnicodeCompare: {

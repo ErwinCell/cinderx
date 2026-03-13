@@ -2,6 +2,8 @@
 
 #include "cinderx/Jit/codegen/autogen.h"
 
+#include "pycore_long.h"
+
 #include "cinderx/Common/util.h"
 #include "cinderx/Jit/code_patcher.h"
 #include "cinderx/Jit/codegen/arch.h"
@@ -253,6 +255,13 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
       case kAlwaysFail:
         as->jmp(deopt_label);
         break;
+      case kCompactLong: {
+        as->cmp(
+            x86::qword_ptr(reg, offsetof(PyLongObject, long_value.lv_tag)),
+            2 << _PyLong_NON_SIZE_BITS);
+        as->jae(deopt_label);
+        break;
+      }
       case kIs:
         emit_cmp(reg);
         as->jne(deopt_label);
@@ -388,6 +397,21 @@ void TranslateGuard(Environ* env, const Instruction* instr) {
       case kAlwaysFail:
         as->b(deopt_label);
         break;
+      case kCompactLong: {
+        as->ldr(
+            arch::reg_scratch_0,
+            arch::ptr_offset(
+                reg, offsetof(PyLongObject, long_value.lv_tag)));
+        arch::cmp_immediate(
+            as,
+            arch::reg_scratch_0,
+            static_cast<uint64_t>(2 << _PyLong_NON_SIZE_BITS));
+        auto skip = as->newLabel();
+        as->b_lo(skip);
+        as->b(deopt_label);
+        as->bind(skip);
+        break;
+      }
       case kIs:
         emit_cmp(reg);
         emit_b_ne_far(deopt_label);

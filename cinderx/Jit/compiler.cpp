@@ -18,6 +18,7 @@
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
 #include "cinderx/Jit/hir/list_slice_cleanup.h"
+#include "cinderx/Jit/hir/long_loop_unboxing.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/printer.h"
 #include "cinderx/Jit/hir/primitive_box_remat.h"
@@ -119,6 +120,7 @@ void Compiler::runPasses(
   runPassIf(
       hir::BuiltinLoadMethodElimination{}, PassConfig::kBuiltinLoadMethodElim);
   runSimplifyPassesIfEnabled();
+  runPass(jit::hir::LongLoopUnboxing{}, irfunc, callback);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
   runPassIf(hir::DeadCodeElimination{}, PassConfig::kDeadCodeElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);

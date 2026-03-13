@@ -567,6 +567,10 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
       const auto& bin_op = static_cast<const IntBinaryOp&>(instr);
       return std::string{GetBinaryOpName(bin_op.op())};
     }
+    case Opcode::kCheckedIntBinaryOp: {
+      const auto& bin_op = static_cast<const CheckedIntBinaryOp&>(instr);
+      return std::string{GetBinaryOpName(bin_op.op())};
+    }
     case Opcode::kPrimitiveCompare: {
       const auto& cmp = static_cast<const PrimitiveCompare&>(instr);
       return std::string{GetPrimitiveCompareOpName(cmp.op())};
@@ -652,6 +656,7 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
       const auto& build_slice = static_cast<const BuildSlice&>(instr);
       return fmt::format("{}", build_slice.NumOperands());
     }
+    case Opcode::kLongUnboxCompact:
     case Opcode::kListSlice:
       return "";
     case Opcode::kLoadTypeAttrCacheEntryType: {

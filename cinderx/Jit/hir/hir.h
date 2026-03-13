@@ -1505,6 +1505,37 @@ class INSTR_CLASS(
   BinaryOpKind op_;
 };
 
+class INSTR_CLASS(
+    CheckedIntBinaryOp,
+    (Constraint::kMatchAllAsCInt, Constraint::kMatchAllAsCInt),
+    HasOutput,
+    Operands<2>,
+    DeoptBase) {
+ public:
+  CheckedIntBinaryOp(
+      Register* dst,
+      BinaryOpKind op,
+      Register* left,
+      Register* right,
+      const FrameState& frame)
+      : InstrT(dst, left, right, frame), op_(op) {}
+
+  BinaryOpKind op() const {
+    return op_;
+  }
+
+  Register* left() const {
+    return GetOperand(0);
+  }
+
+  Register* right() const {
+    return GetOperand(1);
+  }
+
+ private:
+  BinaryOpKind op_;
+};
+
 // Perform a binary operation (e.g. '+', '-') on primitive double operands
 class INSTR_CLASS(
     DoubleBinaryOp,
@@ -1774,6 +1805,21 @@ class INSTR_CLASS(
 
  private:
   CompareOp op_;
+};
+
+class INSTR_CLASS(
+    LongUnboxCompact,
+    (TLongExact),
+    HasOutput,
+    Operands<1>,
+    DeoptBase) {
+ public:
+  LongUnboxCompact(Register* dst, Register* value, const FrameState& frame)
+      : InstrT(dst, value, frame) {}
+
+  Register* value() const {
+    return GetOperand(0);
+  }
 };
 
 // Perform the comparison indicated by op between two strings

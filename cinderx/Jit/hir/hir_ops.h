@@ -34,6 +34,7 @@ namespace jit::hir {
   V(CheckVar)                          \
   V(CheckFreevar)                      \
   V(CheckField)                        \
+  V(CheckedIntBinaryOp)                \
   V(CIntToCBool)                       \
   V(Compare)                           \
   V(CompareBool)                       \
@@ -128,6 +129,7 @@ namespace jit::hir {
   V(LongCompare)                       \
   V(LongBinaryOp)                      \
   V(LongInPlaceOp)                     \
+  V(LongUnboxCompact)                  \
   V(MakeCheckedDict)                   \
   V(MakeCheckedList)                   \
   V(MakeCell)                          \

@@ -563,6 +563,15 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       NEW_INSTR(IntBinaryOp, dst, op, left, right);
       break;
     }
+    case Opcode::kCheckedIntBinaryOp: {
+      expect("<");
+      BinaryOpKind op = ParseBinaryOpName(GetNextToken());
+      expect(">");
+      auto left = ParseRegister();
+      auto right = ParseRegister();
+      NEW_INSTR(CheckedIntBinaryOp, dst, op, left, right, FrameState{});
+      break;
+    }
     case Opcode::kFloatBinaryOp: {
       expect("<");
       BinaryOpKind op = ParseBinaryOpName(GetNextToken());
@@ -602,6 +611,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       auto left = ParseRegister();
       auto right = ParseRegister();
       NEW_INSTR(LongCompare, dst, op, left, right);
+      break;
+    }
+    case Opcode::kLongUnboxCompact: {
+      auto operand = ParseRegister();
+      NEW_INSTR(LongUnboxCompact, dst, operand, FrameState{});
       break;
     }
     case Opcode::kUnicodeCompare: {

@@ -3184,3 +3184,52 @@ Note:
 - Interpretation:
   - the final narrowed policy removes the catastrophic mixed-type deopt storm
   - on raytrace, CinderX JIT is now ahead of the previously recorded CPython JIT median (~0.6861 s)
+
+## 2026-03-13 Issue 23: speculative long-loop unboxing
+
+### Scope
+- Added minimal IR/lowering support:
+  - `CheckedIntBinaryOp`
+  - `LongUnboxCompact`
+  - compact-long `Guard` lowering
+- Added a new HIR pass:
+  - `LongLoopUnboxing`
+  - gated on `specialized_opcodes`
+  - rewrites narrow `hot_loop`-style `LongExact` loop-carried phis into primitive `CInt64` shadow phis
+
+### Remote verification
+- Host:
+  - `124.70.162.35`
+- Working tree:
+  - `/root/work/cinderx-git`
+- Build:
+  - reconfigured and rebuilt `_cinderx.so` successfully
+- Targeted runtime regression:
+  - `test_cinderx.test_arm_runtime.ArmRuntimeTests.test_hot_loop_uses_long_loop_unboxing`
+  - result: `OK`
+- Existing runtime regressions re-run:
+  - `test_list_annotation_enables_exact_slice_and_item_specialization`
+  - `test_primitive_unbox_cse_for_float_add_self`
+  - result: both `OK`
+
+### final HIR
+- `hot_loop(n)` now compiles to:
+  - `CheckedIntBinaryOp: 2`
+  - `LongUnboxCompact: 1`
+  - `PrimitiveCompare: 1`
+  - `PrimitiveBox: 1`
+  - `LongInPlaceOp: 0`
+  - `CompareBool: 0`
+- The loop bound is guarded/unboxed once in the preheader.
+- The loop-carried accumulator/counter are primitive phis.
+- Only the final return is boxed.
+
+### benchmark
+- Workload:
+  - `hot_loop(10000)`
+  - `OUTER=2000`
+  - `REPEATS=7`
+- Result:
+  - baseline median: `0.8305595869896933s`
+  - current median: `0.028081598924472928s`
+  - speedup: about `29.6x`
