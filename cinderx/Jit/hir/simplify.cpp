@@ -1942,6 +1942,44 @@ static PyObject* getKnownBuiltinMathSqrt(const LoadModuleAttrCached* load) {
   return value;
 }
 
+static PyObject* getKnownBuiltinMathSqrt(PyObject* value) {
+  if (value == nullptr || !PyCFunction_Check(value)) {
+    return nullptr;
+  }
+
+  auto* func = reinterpret_cast<PyCFunctionObject*>(value);
+  if (func->m_ml == nullptr || func->m_ml->ml_name == nullptr) {
+    return nullptr;
+  }
+  if (std::strcmp(func->m_ml->ml_name, "sqrt") != 0) {
+    return nullptr;
+  }
+
+  PyObject* self = PyCFunction_GET_SELF(value);
+  if (self == nullptr || !PyModule_Check(self)) {
+    return nullptr;
+  }
+
+  PyModuleDef* def = PyModule_GetDef(self);
+  if (def == nullptr) {
+    PyErr_Clear();
+    return nullptr;
+  }
+  if (std::strcmp(def->m_name, "math") != 0) {
+    return nullptr;
+  }
+
+  PyMethodDef* sqrt_def = findModuleMethod(def, "sqrt");
+  if (sqrt_def == nullptr) {
+    return nullptr;
+  }
+  if (func->m_ml != sqrt_def) {
+    return nullptr;
+  }
+
+  return value;
+}
+
 static Register* simplifyVectorCallMathSqrt(
     Env& env,
     const VectorCall* instr) {
@@ -1950,13 +1988,21 @@ static Register* simplifyVectorCallMathSqrt(
   }
 
   Register* target = modelReg(instr->func());
-  if (!target->instr()->IsLoadModuleAttrCached()) {
-    return nullptr;
-  }
-
-  auto* load = static_cast<const LoadModuleAttrCached*>(target->instr());
-  PyObject* expected = getKnownBuiltinMathSqrt(load);
-  if (expected == nullptr) {
+  const LoadModuleAttrCached* module_load = nullptr;
+  PyObject* expected = nullptr;
+  if (target->instr()->IsLoadModuleAttrCached()) {
+    auto* load = static_cast<const LoadModuleAttrCached*>(target->instr());
+    expected = getKnownBuiltinMathSqrt(load);
+    if (expected == nullptr) {
+      return nullptr;
+    }
+    module_load = load;
+  } else if (target->instr()->IsGuardIs()) {
+    auto* guard = static_cast<const GuardIs*>(target->instr());
+    if (getKnownBuiltinMathSqrt(guard->target()) == nullptr) {
+      return nullptr;
+    }
+  } else {
     return nullptr;
   }
 
@@ -1975,8 +2021,13 @@ static Register* simplifyVectorCallMathSqrt(
     return nullptr;
   }
 
-  env.emit<GuardModuleAttrValue>(
-      expected, load->GetOperand(0), load->name_idx(), *instr->frameState());
+  if (module_load != nullptr) {
+    env.emit<GuardModuleAttrValue>(
+        expected,
+        module_load->GetOperand(0),
+        module_load->name_idx(),
+        *instr->frameState());
+  }
   env.emit<GuardNonNegativeDouble>(double_arg, *instr->frameState());
   Register* result = env.emit<DoubleSqrt>(double_arg);
   return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
