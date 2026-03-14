@@ -89,6 +89,19 @@ static std::optional<OwnedType> infer_method_self_type_candidate(
       true};
 }
 
+static bool is_named_other_arg(BorrowedRef<PyCodeObject> code, int arg_idx) {
+  BorrowedRef<> arg_name_obj{jit::getVarname(code, arg_idx)};
+  if (!PyUnicode_CheckExact(arg_name_obj)) {
+    return false;
+  }
+  const char* arg_name = PyUnicode_AsUTF8(arg_name_obj);
+  if (arg_name == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  return std::strcmp(arg_name, "other") == 0;
+}
+
 static OwnedType resolve_type_descr(BorrowedRef<> descr) {
   int optional, exact;
   auto type = Ref<PyTypeObject>::steal(
@@ -337,6 +350,14 @@ std::optional<Type> Preloader::inferredSelfType() const {
   return inferred_self_type_->toHir();
 }
 
+std::optional<Type> Preloader::inferredArgType(long local_idx) const {
+  auto it = inferred_arg_types_.find(local_idx);
+  if (it == inferred_arg_types_.end()) {
+    return std::nullopt;
+  }
+  return it->second.toHir();
+}
+
 PyObject** Preloader::getGlobalCache(BorrowedRef<> name_obj) const {
   JIT_DCHECK(
       canCacheGlobals(),
@@ -394,6 +415,19 @@ bool Preloader::preload() {
   }
 
   inferred_self_type_ = infer_method_self_type_candidate(code_, globals_);
+  if (inferred_self_type_.has_value()) {
+    for (int arg_idx = 1; arg_idx < numArgs(); arg_idx++) {
+      if (!is_named_other_arg(code_, arg_idx)) {
+        continue;
+      }
+      inferred_arg_types_.emplace(
+          arg_idx,
+          OwnedType{
+              Ref<PyTypeObject>::create(inferred_self_type_->type),
+              inferred_self_type_->optional,
+              inferred_self_type_->exact});
+    }
+  }
 
   jit::BytecodeInstructionBlock bc_instrs{code_};
   for (auto bc_instr : bc_instrs) {

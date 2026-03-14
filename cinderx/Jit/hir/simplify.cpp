@@ -1438,30 +1438,19 @@ Register* simplifyLoadAttrSplitDict(
       "inline_values.valid",
       type->tp_basicsize + offsetof(PyDictValues, valid),
       TCUInt8);
+  auto* valid_guard = env.emitInstr<Guard>(inline_values_valid);
+  valid_guard->setGuiltyReg(receiver);
+  valid_guard->setDescr("inline_values.valid");
 
-  return env.emitCond(
-      [&](BasicBlock* bb1, BasicBlock* bb2) {
-        env.emit<CondBranch>(inline_values_valid, bb1, bb2);
-      },
-      [&] { // Inline values are valid.
-        Register* maybe_attr = env.emit<LoadField>(
-            receiver,
-            unicodeAsString(name),
-            attr_idx * sizeof(PyObject*) + type->tp_basicsize +
-                offsetof(PyDictValues, values),
-            TOptObject);
-        Register* attr =
-            env.emit<CheckField>(maybe_attr, name, *load_attr->frameState());
-        static_cast<CheckField*>(attr->instr())->setGuiltyReg(receiver);
-        return attr;
-      },
-      [&] { // Not valid - slow-path, call getattr.
-        return env.emit<LoadAttr>(
-            receiver,
-            load_attr->name_idx(),
-            *load_attr->frameState(),
-            /* already_optimized= */ true);
-      });
+  Register* maybe_attr = env.emit<LoadField>(
+      receiver,
+      unicodeAsString(name),
+      attr_idx * sizeof(PyObject*) + type->tp_basicsize +
+          offsetof(PyDictValues, values),
+      TOptObject);
+  Register* attr = env.emit<CheckField>(maybe_attr, name, *load_attr->frameState());
+  static_cast<CheckField*>(attr->instr())->setGuiltyReg(receiver);
+  return attr;
 }
 
 #else

@@ -565,6 +565,76 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(float(lines[-2]), 54.0, proc.stdout)
             self.assertEqual(float(lines[-1]), 45.0, proc.stdout)
 
+    def test_plain_instance_other_arg_guard_eliminates_cached_attr_loads(self) -> None:
+        # Regression guard:
+        # for a top-level leaf-class method taking `other`, exact arg guards
+        # should let both receiver sides lower off the generic LoadAttrCached
+        # path.
+        code = textwrap.dedent(
+            """
+            import math
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Point:
+                def __init__(self, x=0.0, y=0.0, z=0.0):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def dist(self, other):
+                    return math.sqrt(
+                        (self.x - other.x) ** 2
+                        + (self.y - other.y) ** 2
+                        + (self.z - other.z) ** 2
+                    )
+
+            a = Point(1.0, 2.0, 3.0)
+            b = Point(4.0, 5.0, 6.0)
+            for _ in range(20000):
+                a.dist(b)
+
+            assert jit.force_compile(Point.dist)
+            counts = cinderjit.get_function_hir_opcode_counts(Point.dist)
+            print(counts.get("GuardType", 0))
+            print(counts.get("LoadField", 0))
+            print(counts.get("LoadAttr", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(counts.get("DeoptPatchpoint", 0))
+            print(a.dist(b))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/plain_instance_other_arg_guard.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 11, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 12, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 6, proc.stdout)
+            self.assertEqual(float(lines[-1]), 5.196152422706632, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

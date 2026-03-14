@@ -6,6 +6,7 @@
 #include "cinderx/Jit/hir/instr_effects.h"
 #include "cinderx/Jit/hir/pass.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -75,11 +76,11 @@ Register* getGuardedReceiver(Register* reg) {
 }
 
 std::optional<GuardKey> getGuardKey(Guard* guard) {
+  Register* cond = chaseAssignOperand(guard->GetOperand(0));
   if (!isSlotVersionGuardDescr(guard->descr())) {
     return std::nullopt;
   }
 
-  Register* cond = chaseAssignOperand(guard->GetOperand(0));
   if (!cond->instr()->IsPrimitiveCompare()) {
     return std::nullopt;
   }

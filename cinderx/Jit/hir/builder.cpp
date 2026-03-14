@@ -675,6 +675,11 @@ void HIRBuilder::emitTypeAnnotationGuards(TranslationContext& tc) {
   if (auto inferred_self_type = preloader_.inferredSelfType()) {
     emit_arg_guard(0, *inferred_self_type);
   }
+  for (int arg_idx = 1; arg_idx < preloader_.numArgs(); arg_idx++) {
+    if (auto inferred_arg_type = preloader_.inferredArgType(arg_idx)) {
+      emit_arg_guard(arg_idx, *inferred_arg_type);
+    }
+  }
 
   // Bail out if there are no annotations.
   if (!index) {

@@ -152,6 +152,10 @@ class Preloader {
   // into runtime specialization.
   std::optional<Type> inferredSelfType() const;
 
+  // Candidate exact type for a selected non-self argument inferred from the
+  // same owner type as self().
+  std::optional<Type> inferredArgType(long local_idx) const;
+
   // get value for global at given name index
   BorrowedRef<> global(int name_idx) const;
 
@@ -248,6 +252,7 @@ class Preloader {
   std::unordered_map<long, Type> check_arg_types_;
   std::map<long, OwnedType> check_arg_pytypes_;
   std::optional<OwnedType> inferred_self_type_;
+  std::map<long, OwnedType> inferred_arg_types_;
   // keyed by name index, names borrowed from code object
   GlobalNamesMap global_names_;
   Type return_type_{TObject};
