@@ -1944,12 +1944,7 @@ static bool isBuiltin(PyMethodDef* meth, const char* name) {
   return builtins.find(meth) == name;
 }
 
-static bool isBuiltin(Register* callable, const char* name) {
-  Type callable_type = callable->type();
-  if (!callable_type.hasObjectSpec()) {
-    return false;
-  }
-  PyObject* callable_obj = callable_type.objectSpec();
+static bool isBuiltin(PyObject* callable_obj, const char* name) {
   if (Py_TYPE(callable_obj) == &PyCFunction_Type) {
     PyCFunctionObject* func =
         reinterpret_cast<PyCFunctionObject*>(callable_obj);
@@ -1961,6 +1956,14 @@ static bool isBuiltin(Register* callable, const char* name) {
     return isBuiltin(meth->d_method, name);
   }
   return false;
+}
+
+static bool isBuiltin(Register* callable, const char* name) {
+  Type callable_type = callable->type();
+  if (!callable_type.hasObjectSpec()) {
+    return false;
+  }
+  return isBuiltin(callable_type.objectSpec(), name);
 }
 
 enum class TinyMethodResult {
@@ -2523,6 +2526,61 @@ static Register* simplifyVectorCallMathSqrt(
   return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
 }
 
+static Register* simplifyVectorCallBuiltinMinMax(
+    Env& env,
+    const VectorCall* instr) {
+  if (instr->numArgs() != 2) {
+    return nullptr;
+  }
+
+  Register* target = modelReg(instr->func());
+  bool is_min = false;
+  bool is_max = false;
+  if (target->instr()->IsGuardIs()) {
+    auto* guard = static_cast<const GuardIs*>(target->instr());
+    is_min = isBuiltin(guard->target(), "min");
+    is_max = isBuiltin(guard->target(), "max");
+  } else {
+    is_min = isBuiltin(target, "min");
+    is_max = isBuiltin(target, "max");
+  }
+  if (!is_min && !is_max) {
+    return nullptr;
+  }
+
+  Register* lhs = instr->arg(0);
+  Register* rhs = instr->arg(1);
+  if (!lhs->isA(TFloatExact)) {
+    lhs = env.emit<GuardType>(TFloatExact, lhs, *instr->frameState());
+  }
+  if (!rhs->isA(TFloatExact)) {
+    rhs = env.emit<GuardType>(TFloatExact, rhs, *instr->frameState());
+  }
+
+  env.emit<UseType>(target, target->type());
+  env.emit<UseType>(lhs, TFloatExact);
+  env.emit<UseType>(rhs, TFloatExact);
+
+  Register* lhs_unboxed = env.emit<PrimitiveUnbox>(lhs, TCDouble);
+  Register* rhs_unboxed = env.emit<PrimitiveUnbox>(rhs, TCDouble);
+  PrimitiveCompareOp op = is_min ? PrimitiveCompareOp::kLessThanUnsigned
+                                 : PrimitiveCompareOp::kGreaterThanUnsigned;
+  Register* choose_rhs = env.emit<PrimitiveCompare>(op, rhs_unboxed, lhs_unboxed);
+
+  return env.emitCond(
+      [&](BasicBlock* rhs_block, BasicBlock* lhs_block) {
+        env.emit<CondBranch>(choose_rhs, rhs_block, lhs_block);
+      },
+      [&] { // rhs wins
+        env.emit<UseType>(rhs, TFloatExact);
+        return rhs;
+      },
+      [&] { // lhs wins
+        env.emit<UseType>(lhs, TFloatExact);
+        return lhs;
+      });
+}
+
 static Register* simplifyLoadModuleAttrCachedMathSqrt(
     Env& env,
     const LoadModuleAttrCached* instr) {
@@ -2803,6 +2861,9 @@ Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
   }
   if (instr->flags() & CallFlags::KwArgs) {
     return nullptr;
+  }
+  if (Register* result = simplifyVectorCallBuiltinMinMax(env, instr)) {
+    return result;
   }
   if (Register* result = simplifyVectorCallMathSqrt(env, instr)) {
     return result;

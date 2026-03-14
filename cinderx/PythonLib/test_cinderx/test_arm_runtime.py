@@ -1754,6 +1754,137 @@ class ArmRuntimeTests(unittest.TestCase):
                 proc.stdout.strip().splitlines()[-1], "valueerror", proc.stdout
             )
 
+    def test_builtin_min_max_two_float_args_eliminate_vectorcall(self) -> None:
+        # Regression guard:
+        # two-arg builtin min/max on exact floats should avoid the generic
+        # VectorCall path while preserving Python result semantics.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def min_builtin(a, b):
+                return min(a, b)
+
+            def max_builtin(a, b):
+                return max(a, b)
+
+            for _ in range(10000):
+                min_builtin(1.5, 2.5)
+                max_builtin(1.5, 2.5)
+
+            assert jit.force_compile(min_builtin)
+            assert jit.force_compile(max_builtin)
+
+            counts_min = cinderjit.get_function_hir_opcode_counts(min_builtin)
+            counts_max = cinderjit.get_function_hir_opcode_counts(max_builtin)
+            print(counts_min.get("VectorCall", 0))
+            print(counts_max.get("VectorCall", 0))
+            print(counts_min.get("PrimitiveCompare", 0))
+            print(counts_max.get("PrimitiveCompare", 0))
+            print(min_builtin(1.5, 2.5))
+            print(max_builtin(1.5, 2.5))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/builtin_minmax_no_vectorcall.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertEqual(int(lines[-6]), 0, proc.stdout)
+            self.assertEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(float(lines[-2]), 1.5, proc.stdout)
+            self.assertEqual(float(lines[-1]), 2.5, proc.stdout)
+
+    def test_builtin_min_max_two_float_args_preserve_order_nan_and_identity(self) -> None:
+        # Regression guard:
+        # the specialized min/max path must preserve Python's order-sensitive
+        # NaN handling, signed-zero tie behavior, and object identity.
+        code = textwrap.dedent(
+            """
+            import math
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def min_builtin(a, b):
+                return min(a, b)
+
+            def max_builtin(a, b):
+                return max(a, b)
+
+            nan = float("nan")
+            one = float(1.0)
+            z = 0.0
+            nz = -0.0
+            a = float(1.25)
+            b = float(1.25)
+
+            for _ in range(10000):
+                min_builtin(1.5, 2.5)
+                max_builtin(1.5, 2.5)
+
+            assert jit.force_compile(min_builtin)
+            assert jit.force_compile(max_builtin)
+
+            print(math.isnan(min_builtin(nan, one)))
+            print(min_builtin(one, nan) is one)
+            print(math.copysign(1.0, min_builtin(z, nz)))
+            print(math.copysign(1.0, max_builtin(z, nz)))
+            print(min_builtin(a, b) is a)
+            print(max_builtin(a, b) is a)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/builtin_minmax_semantics.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertEqual(lines[-6], "True", proc.stdout)
+            self.assertEqual(lines[-5], "True", proc.stdout)
+            self.assertEqual(float(lines[-4]), 1.0, proc.stdout)
+            self.assertEqual(float(lines[-3]), 1.0, proc.stdout)
+            self.assertEqual(lines[-2], "True", proc.stdout)
+            self.assertEqual(lines[-1], "True", proc.stdout)
+
     def test_slot_type_version_guards_are_deduplicated(self) -> None:
         # Regression guard:
         # repeated LOAD_ATTR_SLOT / STORE_ATTR_SLOT operations on the same SSA

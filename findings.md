@@ -3233,3 +3233,141 @@ Note:
   - baseline median: `0.8305595869896933s`
   - current median: `0.028081598924472928s`
   - speedup: about `29.6x`
+
+## 2026-03-14 issue31 raytrace regression fix
+
+Root cause confirmation:
+- the severe regression was not caused by the basic issue31 attr specialization alone
+- it came from combining that specialization with specialized float-op guards on helper-heavy no-backedge raytrace methods
+- after the issue31 work, methods such as `Vector.dot`, `Point.__sub__`, and `Sphere.intersectionTime` ended up on exact-instance field paths, which exposed aggressive `FloatExact` guards and caused large GuardFailure deopt spikes on mixed `int` / `float` values
+
+Fix implemented:
+- narrowed the issue31-specific exact `other` arg inference to plain-attr-read shapes only
+- added a new function-level metadata bit for aggressive split-dict pure-load lowering
+- changed specialized float-op guard policy in `builder.cpp`:
+  - keep exact float guards for loop-hot code or issue31-style plain-attr methods
+  - drop them for helper-heavy no-backedge methods such as the raytrace shapes
+
+Targeted ARM regressions:
+- `test_plain_instance_other_arg_guard_eliminates_cached_attr_loads`: `OK`
+- `test_other_arg_inference_skips_helper_method_shapes`: `OK`
+
+Issue31 A/B after the fix:
+- `PointOther.dist` median: `0.3772901860065758 s`
+- `PointRhs.dist` median: `0.40128343703690916 s`
+- dist improvement remains: about `6.0%`
+- `PointOther` mixed benchmark median: `0.20818231801968068 s`
+- `PointRhs` mixed benchmark median: `0.21198970696423203 s`
+- mixed improvement remains: about `1.8%`
+
+Provided raytrace regression script after the fix:
+- elapsed wall for the measured run: `1.1966644480125979 s`
+- severe deopt sites removed from the top list:
+  - `Vector.dot` no longer appears in runtime deopt stats
+  - `Point.__sub__` no longer appears in runtime deopt stats
+  - `Sphere.intersectionTime` no longer appears in runtime deopt stats
+- remaining deopts are much smaller and now concentrated in:
+  - `Vector.scale` line 31: `5333` (+ `2`)
+  - `addColours` line 219: `5333`
+
+HIR spot-check after the fix:
+- `Vector.dot`
+  - `GuardType = 2`
+  - `LoadField = 12`
+  - `DoubleBinaryOp = 0`
+  - no runtime deopt entries in the measured run
+- `Point.__sub__`
+  - `GuardType = 3`
+  - `LoadField = 24`
+  - no runtime deopt entries in the measured run
+- `Sphere.intersectionTime`
+  - `GuardType = 1`
+  - `LoadField = 6`
+  - no runtime deopt entries in the measured run
+- `addColours`
+  - still `GuardType = 6`
+- `Vector.scale`
+  - still `GuardType = 5`
+
+Conclusion:
+- the severe issue31-induced raytrace regression is largely fixed
+- the main catastrophic deopt sources are gone while the intended issue31 gains still remain
+- there are still smaller mixed numeric deopts left in `Vector.scale` and `addColours`, but they are no longer the same class of large regression introduced by the issue31 change
+
+## 2026-03-14 issue34 builtin min/max float specialization
+
+Problem confirmation:
+- two-arg builtin `min(a, b)` / `max(a, b)` on exact floats still compiled through a generic `VectorCall`
+- this paid full Python call overhead even though the hot path only needed float comparison plus selection
+
+Semantics analysis:
+- the issue proposal to lower directly to `DoubleBinaryOp<Min/Max>` / ARM64 `FMIN/FMAX` is not fully safe for Python builtins
+- Python `min/max` return one of the original operand objects, not a freshly boxed float
+- behavior is order-sensitive for NaN and ties:
+  - `min(float("nan"), 1.0)` returns the first argument object
+  - `min(1.0, float("nan"))` returns the first argument object (`1.0`)
+  - `min(0.0, -0.0)` and `max(0.0, -0.0)` preserve the first argument object (`0.0`)
+- so the safe lowering is:
+  - keep builtin identity guard
+  - guard args to `FloatExact`
+  - `PrimitiveUnbox<CDouble>` both args
+  - `PrimitiveCompare` on unboxed doubles
+  - branch/select the original operand object
+
+Implementation:
+- `cinderx/Jit/hir/simplify.cpp`
+  - added `simplifyVectorCallBuiltinMinMax()`
+  - fixed builtin recognition for the `GuardIs` shape by checking `GuardIs::target()`
+  - specialized exactly two-arg builtin `min`/`max` calls on exact floats
+- `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+  - added `test_builtin_min_max_two_float_args_eliminate_vectorcall`
+  - added `test_builtin_min_max_two_float_args_preserve_order_nan_and_identity`
+
+Remote ARM verification:
+- editable rebuild on `/root/work/frame-stage-local`: success
+- targeted tests:
+  - `test_builtin_min_max_two_float_args_eliminate_vectorcall`: passed
+  - `test_builtin_min_max_two_float_args_preserve_order_nan_and_identity`: passed
+
+Optimized HIR:
+- `__main__:min_builtin`
+  - `LoadGlobalCached<"min">`
+  - `GuardIs<builtin min>`
+  - `GuardType<FloatExact>` x2
+  - `PrimitiveUnbox<CDouble>` x2
+  - `PrimitiveCompare<LessThanUnsigned>`
+  - `CondBranch`
+  - no `VectorCall`
+- `__main__:max_builtin`
+  - same shape with `PrimitiveCompare<GreaterThanUnsigned>`
+  - no `VectorCall`
+
+Opcode counts:
+- `counts_min`
+  - `VectorCall = 0`
+  - `GuardType = 2`
+  - `PrimitiveUnbox = 2`
+  - `PrimitiveCompare = 1`
+  - `CondBranch = 2`
+  - `Phi = 1`
+- `counts_max`
+  - `VectorCall = 0`
+  - `GuardType = 2`
+  - `PrimitiveUnbox = 2`
+  - `PrimitiveCompare = 1`
+  - `CondBranch = 2`
+  - `Phi = 1`
+
+Performance (`N = 2_000_000`):
+- `min_builtin`: `0.1626069820486009s`
+- `min_ternary`: `0.2111730769975111s`
+- `min_ratio`: `0.7700175815997482x`
+- `max_builtin`: `0.16318202891852707s`
+- `max_ternary`: `0.21114284498617053s`
+- `max_ratio`: `0.7728513316622934x`
+
+Conclusion:
+- issue34 is fixed from the performance perspective:
+  - the generic `VectorCall` path is gone
+  - the specialized builtin version is now faster than the manual ternary baseline on ARM
+- the final implementation intentionally does not use `DoubleBinaryOp<Min/Max>` because that would break Python builtin semantics around NaN, signed zero, and object identity
