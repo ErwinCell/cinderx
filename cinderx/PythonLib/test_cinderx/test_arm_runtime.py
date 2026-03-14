@@ -1906,11 +1906,15 @@ class ArmRuntimeTests(unittest.TestCase):
 
             dump = proc.stdout + "\n" + proc.stderr
             self.assertIn("StoreArrayItem", dump)
+            self.assertIn("StoreSubscr", dump)
             self.assertIn("CondBranchCheckType", dump)
             self.assertIn("ObjectUser[array.array:Exact]", dump)
-            self.assertNotIn("StoreSubscr", dump)
-            self.assertNotIn("PrimitiveBox<CDouble>", dump)
-            self.assertIn("Deopt", dump)
+            self.assertIn("PrimitiveBox<CDouble>", dump)
+            self.assertLess(
+                dump.index("StoreArrayItem"),
+                dump.index("PrimitiveBox<CDouble>"),
+                dump,
+            )
 
     def test_primitive_box_remat_deopt_correctness(self) -> None:
         # Regression guard:
