@@ -2677,6 +2677,20 @@ Register* simplifyCallMethod(Env& env, const CallMethod* instr) {
     return result;
   }
 
+  if (instr->func()->type().hasValueSpec(TFunc) &&
+      !(instr->self()->type() <= TNullptr)) {
+    auto call = env.emitRawInstr<VectorCall>(
+        instr->NumOperands(),
+        env.func.env.AllocateRegister(),
+        instr->flags(),
+        *instr->frameState());
+    for (size_t i = 0; i < instr->NumOperands(); ++i) {
+      call->SetOperand(i, instr->GetOperand(i));
+    }
+    call->output()->set_type(instr->output()->type());
+    return call->output();
+  }
+
   // If this is statically known to be trying to call a function, update to
   // using a VectorCall directly.
   if constexpr (PY_VERSION_HEX >= 0x030E0000) {

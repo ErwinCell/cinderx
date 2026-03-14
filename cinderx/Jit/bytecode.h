@@ -42,6 +42,7 @@ class BytecodeInstruction {
   int opcode() const;
   int specializedOpcode() const;
   int oparg() const;
+  PyObject* cacheObj(int instruction_offset) const;
   uint16_t cacheU16(int instruction_offset) const;
   uint32_t cacheU32(int instruction_offset) const;
 

@@ -89,6 +89,7 @@ int BytecodeInstruction::specializedOpcode() const {
     case COMPARE_OP_INT:
     case COMPARE_OP_STR:
     case LOAD_ATTR_INSTANCE_VALUE:
+    case LOAD_ATTR_METHOD_WITH_VALUES:
     case LOAD_ATTR_SLOT:
     case LOAD_ATTR_MODULE:
     case STORE_ATTR_INSTANCE_VALUE:
@@ -109,6 +110,15 @@ int BytecodeInstruction::specializedOpcode() const {
 int BytecodeInstruction::oparg() const {
   calcOpcodeOffsetAndOparg();
   return extendedOparg_;
+}
+
+PyObject* BytecodeInstruction::cacheObj(int instruction_offset) const {
+#if PY_VERSION_HEX >= 0x030C0000
+  auto idx = opcodeIndex().value() + instruction_offset;
+  return read_obj(&codeUnit(code_)[idx].cache);
+#else
+  JIT_ABORT("cacheObj() not supported before Python 3.12");
+#endif
 }
 
 uint16_t BytecodeInstruction::cacheU16(int instruction_offset) const {

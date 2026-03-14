@@ -3008,6 +3008,34 @@ void HIRBuilder::emitLoadAttr(
       guard->setGuiltyReg(receiver);
       guard->setDescr(descr);
     };
+    auto emit_heap_keys_version_guard =
+        [&](Register* obj_type, uint32_t keys_version, const char* descr) {
+      Register* keys = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          keys,
+          obj_type,
+          "ht_cached_keys",
+          offsetof(PyHeapTypeObject, ht_cached_keys),
+          TCPtr);
+
+      Register* version = temps_.AllocateStack();
+      tc.emit<LoadField>(
+          version,
+          keys,
+          "dk_version",
+          offsetof(PyDictKeysObject, dk_version),
+          TCUInt32);
+
+      Register* expected = temps_.AllocateStack();
+      tc.emit<LoadConst>(expected, Type::fromCUInt(keys_version, TCUInt32));
+
+      Register* matches = temps_.AllocateStack();
+      tc.emit<PrimitiveCompare>(
+          matches, PrimitiveCompareOp::kEqual, version, expected);
+      auto* guard = tc.emit<Guard>(matches, tc.frame);
+      guard->setGuiltyReg(receiver);
+      guard->setDescr(descr);
+    };
 #endif
 
     switch (bc_instr.specializedOpcode()) {
@@ -3054,6 +3082,22 @@ void HIRBuilder::emitLoadAttr(
         CheckField* cf = tc.emit<CheckField>(result, result, name, tc.frame);
         cf->setGuiltyReg(receiver);
         tc.frame.stack.push(result);
+        return;
+      }
+      case LOAD_ATTR_METHOD_WITH_VALUES: {
+        Register* obj_type = emit_type_version_guard(
+            bc_instr.cacheU32(2), "LOAD_ATTR_METHOD_WITH_VALUES");
+        emit_inline_values_valid_guard(obj_type, "LOAD_ATTR_METHOD_WITH_VALUES");
+        emit_heap_keys_version_guard(
+            obj_type, bc_instr.cacheU32(4), "LOAD_ATTR_METHOD_WITH_VALUES");
+        PyObject* descr = bc_instr.cacheObj(6);
+        if (descr == nullptr) {
+          break;
+        }
+        Register* result = temps_.AllocateStack();
+        tc.emit<LoadConst>(result, Type::fromObject(descr));
+        tc.frame.stack.push(result);
+        tc.frame.stack.push(receiver);
         return;
       }
 #endif
