@@ -2101,6 +2101,7 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(lines[-1], "([10, 20], 30, [40, 50])", proc.stdout)
 
     def test_hot_loop_uses_long_loop_unboxing(self) -> None:
+
         code = textwrap.dedent(
             """
             import cinderx.jit as jit
@@ -2156,6 +2157,79 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-3]), 0, proc.stdout)
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 45, proc.stdout)
+
+    def test_unpack_sequence_shared_tuple_and_list_avoid_repeated_deopts(self) -> None:
+        # Regression guard:
+        # a shared UNPACK_SEQUENCE helper should keep both tuple and list on the
+        # compiled fast path instead of specializing permanently to only one.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def do_unpacking(loops, seq):
+                total = 0
+                for _ in range(loops):
+                    a, b, c, d, e, f, g, h, i, j = seq
+                    total += a + j
+                return total
+
+            t = tuple(range(10))
+            l = list(range(10))
+
+            for _ in range(5000):
+                do_unpacking(1, t)
+
+            assert jit.force_compile(do_unpacking)
+            counts = cinderjit.get_function_hir_opcode_counts(do_unpacking)
+
+            jit.get_and_clear_runtime_stats()
+            result_tuple = do_unpacking(2000, t)
+            result_list = do_unpacking(2000, l)
+            stats = jit.get_and_clear_runtime_stats()
+
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats.get("deopt", [])
+                if entry["normal"]["func_qualname"] == "do_unpacking"
+            )
+
+            print(counts.get("LoadFieldAddress", 0))
+            print(counts.get("LoadField", 0))
+            print(deopt_count)
+            print(result_tuple)
+            print(result_list)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/unpack_sequence_bimorphic.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 1, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 18000, proc.stdout)
+            self.assertEqual(int(lines[-1]), 18000, proc.stdout)
 
 
 if __name__ == "__main__":
