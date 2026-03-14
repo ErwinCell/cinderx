@@ -161,6 +161,10 @@ class Preloader {
 
   std::unique_ptr<Function> makeFunction() const;
 
+  bool allowAggressiveSplitDictLoads() const {
+    return allow_aggressive_split_dict_loads_;
+  }
+
   BorrowedRef<PyCodeObject> code() const {
     return code_;
   }
@@ -253,6 +257,7 @@ class Preloader {
   std::map<long, OwnedType> check_arg_pytypes_;
   std::optional<OwnedType> inferred_self_type_;
   std::map<long, OwnedType> inferred_arg_types_;
+  bool allow_aggressive_split_dict_loads_{false};
   // keyed by name index, names borrowed from code object
   GlobalNamesMap global_names_;
   Type return_type_{TObject};

@@ -102,6 +102,92 @@ static bool is_named_other_arg(BorrowedRef<PyCodeObject> code, int arg_idx) {
   return std::strcmp(arg_name, "other") == 0;
 }
 
+static bool is_direct_arg_load(const BytecodeInstruction& bc_instr, int arg_idx) {
+  switch (bc_instr.opcode()) {
+    case LOAD_FAST:
+    case LOAD_FAST_BORROW:
+    case LOAD_FAST_CHECK:
+      return bc_instr.oparg() == arg_idx;
+    default:
+      return false;
+  }
+}
+
+static bool is_direct_local_load(const BytecodeInstruction& bc_instr) {
+  switch (bc_instr.opcode()) {
+    case LOAD_FAST:
+    case LOAD_FAST_BORROW:
+    case LOAD_FAST_CHECK:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool arg_is_only_used_for_plain_attr_reads(
+    BorrowedRef<PyCodeObject> code,
+    int arg_idx) {
+  std::vector<BytecodeInstruction> body;
+  for (auto bc_instr : BytecodeInstructionBlock{code}) {
+    if (bc_instr.opcode() == RESUME) {
+      continue;
+    }
+    body.push_back(bc_instr);
+  }
+
+  bool saw_arg_use = false;
+  for (size_t i = 0; i < body.size(); i++) {
+    if (!is_direct_arg_load(body[i], arg_idx)) {
+      continue;
+    }
+    saw_arg_use = true;
+    if (i + 1 >= body.size()) {
+      return false;
+    }
+    const auto& next = body[i + 1];
+    if (next.opcode() != LOAD_ATTR) {
+      return false;
+    }
+#if PY_VERSION_HEX >= 0x030C0000
+    if ((next.oparg() & 1) != 0) {
+      return false;
+    }
+#endif
+  }
+  return saw_arg_use;
+}
+
+static bool has_local_method_style_load_attr(BorrowedRef<PyCodeObject> code) {
+  std::vector<BytecodeInstruction> body;
+  for (auto bc_instr : BytecodeInstructionBlock{code}) {
+    if (bc_instr.opcode() == RESUME) {
+      continue;
+    }
+    body.push_back(bc_instr);
+  }
+
+  for (size_t i = 0; i < body.size(); i++) {
+    const auto& bc_instr = body[i];
+    if (bc_instr.opcode() != LOAD_ATTR) {
+      continue;
+    }
+#if PY_VERSION_HEX >= 0x030C0000
+    if ((bc_instr.oparg() & 1) == 0) {
+      continue;
+    }
+#else
+    continue;
+#endif
+    if (i == 0) {
+      continue;
+    }
+    if (is_direct_local_load(body[i - 1])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static OwnedType resolve_type_descr(BorrowedRef<> descr) {
   int optional, exact;
   auto type = Ref<PyTypeObject>::steal(
@@ -393,6 +479,7 @@ std::unique_ptr<Function> Preloader::makeFunction() const {
   irfunc->has_primitive_args = has_primitive_args_;
   irfunc->has_primitive_first_arg = has_primitive_first_arg_;
   irfunc->inferred_self_type = inferredSelfType();
+  irfunc->allow_aggressive_split_dict_loads = allowAggressiveSplitDictLoads();
   for (auto& [local, preloaded_type] : check_arg_pytypes_) {
     irfunc->typed_args.emplace_back(
         local,
@@ -415,9 +502,13 @@ bool Preloader::preload() {
   }
 
   inferred_self_type_ = infer_method_self_type_candidate(code_, globals_);
+  allow_aggressive_split_dict_loads_ = !has_local_method_style_load_attr(code_);
   if (inferred_self_type_.has_value()) {
     for (int arg_idx = 1; arg_idx < numArgs(); arg_idx++) {
       if (!is_named_other_arg(code_, arg_idx)) {
+        continue;
+      }
+      if (!arg_is_only_used_for_plain_attr_reads(code_, arg_idx)) {
         continue;
       }
       inferred_arg_types_.emplace(

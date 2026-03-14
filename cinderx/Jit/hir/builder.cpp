@@ -2185,9 +2185,12 @@ void HIRBuilder::emitBinaryOp(
   // Exact int guards on specialized numeric opcodes work well for loop-hot
   // functions, but can be actively harmful for tiny mixed-numeric leaf helpers
   // like raytrace's Vector.dot(). Keep the int guards only for code objects
-  // that actually contain a backedge. Preserve float exact guards so float-only
-  // leaf helpers can still lower to the existing unboxed fast paths.
+  // that actually contain a backedge. Keep float exact guards only for either
+  // loop-hot code or plain-attribute leaf methods that we deliberately allow
+  // to take the aggressive split-dict fast path.
   bool specialize_int_guards = codeHasBackedge(code_);
+  bool specialize_float_guards =
+      codeHasBackedge(code_) || preloader_.allowAggressiveSplitDictLoads();
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
@@ -2201,8 +2204,10 @@ void HIRBuilder::emitBinaryOp(
       case BINARY_OP_ADD_FLOAT:
       case BINARY_OP_MULTIPLY_FLOAT:
       case BINARY_OP_SUBTRACT_FLOAT:
-        tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
-        tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        if (specialize_float_guards) {
+          tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
+          tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        }
         break;
       case BINARY_OP_ADD_UNICODE:
         tc.emit<GuardType>(left, TUnicodeExact, left, tc.frame);
@@ -2791,11 +2796,15 @@ void HIRBuilder::emitCompareOp(
   Register* result = temps_.AllocateStack();
   CompareOp op = static_cast<CompareOp>(compare_op);
   bool specialize_int_guards = codeHasBackedge(code_);
+  bool specialize_float_guards =
+      codeHasBackedge(code_) || preloader_.allowAggressiveSplitDictLoads();
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
-        tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
-        tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        if (specialize_float_guards) {
+          tc.emit<GuardType>(left, TFloatExact, left, tc.frame);
+          tc.emit<GuardType>(right, TFloatExact, right, tc.frame);
+        }
         break;
       case COMPARE_OP_INT:
         if (specialize_int_guards) {

@@ -635,6 +635,70 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 6, proc.stdout)
             self.assertEqual(float(lines[-1]), 5.196152422706632, proc.stdout)
 
+    def test_other_arg_inference_skips_helper_method_shapes(self) -> None:
+        # Regression guard:
+        # exact-`other` inference should not fire when the arg is used for
+        # helper method calls such as `other.mustBeVector()`.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Vector:
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def mustBeVector(self):
+                    return self
+
+                def dot(self, other):
+                    other.mustBeVector()
+                    return (self.x * other.x) + (self.y * other.y) + (self.z * other.z)
+
+            a = Vector(1.0, 2.0, 3.0)
+            b = Vector(4.0, 5.0, 6.0)
+            for _ in range(20000):
+                a.dot(b)
+
+            assert jit.force_compile(Vector.dot)
+            counts = cinderjit.get_function_hir_opcode_counts(Vector.dot)
+            print(counts.get("GuardType", 0))
+            print(counts.get("LoadField", 0))
+            print(counts.get("LoadAttrCached", 0))
+            print(a.dot(b))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/other_arg_helper_shape.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertLessEqual(int(lines[-4]), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 6, proc.stdout)
+            self.assertLessEqual(int(lines[-2]), 3, proc.stdout)
+            self.assertEqual(float(lines[-1]), 32.0, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

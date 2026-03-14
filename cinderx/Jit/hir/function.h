@@ -59,6 +59,11 @@ class Function {
   // without additional subclass-safety validation.
   std::optional<Type> inferred_self_type;
 
+  // Whether it is safe to use the most aggressive split-dict attr-load
+  // lowering that deopts directly on invalid inline-values instead of keeping
+  // a compiled generic getattr slow path.
+  bool allow_aggressive_split_dict_loads{false};
+
   // Return type
   Type return_type{TObject};
 
