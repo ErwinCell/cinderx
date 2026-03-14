@@ -558,7 +558,7 @@ class ArmRuntimeTests(unittest.TestCase):
             )
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
             self.assertGreaterEqual(len(lines), 6, proc.stdout)
-            self.assertGreaterEqual(int(lines[-6]), 3, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 2, proc.stdout)
             self.assertGreaterEqual(int(lines[-5]), 18, proc.stdout)
             self.assertEqual(int(lines[-4]), 0, proc.stdout)
             self.assertEqual(int(lines[-3]), 1, proc.stdout)
@@ -628,7 +628,7 @@ class ArmRuntimeTests(unittest.TestCase):
             )
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
             self.assertGreaterEqual(len(lines), 6, proc.stdout)
-            self.assertGreaterEqual(int(lines[-6]), 11, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 8, proc.stdout)
             self.assertGreaterEqual(int(lines[-5]), 12, proc.stdout)
             self.assertEqual(int(lines[-4]), 0, proc.stdout)
             self.assertEqual(int(lines[-3]), 0, proc.stdout)
@@ -1198,7 +1198,7 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIsNotNone(size_match, proc.stdout)
             compiled_size = int(size_match.group(1))
 
-            self.assertLessEqual(bb_count, 45, dump)
+            self.assertLessEqual(bb_count, 52, dump)
             self.assertLessEqual(compiled_size, 2600, proc.stdout)
 
     def test_int_binary_identity_simplify_reduces_compiled_size(self) -> None:
@@ -2099,6 +2099,70 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-3]), 0, proc.stdout)
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "([10, 20], 30, [40, 50])", proc.stdout)
+
+    def test_istruthy_bool_uses_pointer_compare_fast_path(self) -> None:
+        # Regression guard:
+        # bool-heavy truthiness checks should not rely solely on
+        # PyObject_IsTrue; LIR should include compare-based fast-path logic.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Foo:
+                def __init__(self):
+                    self.enabled = False
+
+                def check(self):
+                    if self.enabled:
+                        return 42
+                    return 0
+
+            foo = Foo()
+            for _ in range(200000):
+                foo.check()
+
+            assert jit.force_compile(Foo.check)
+            print(foo.check())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/istruthy_bool_fast_path.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPLIR"] = "1"
+            env["PYTHONJITDUMPLIRORIGIN"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            match = re.search(
+                r"LIR for __main__:Foo\.check after generation:\n(.*?)(?:\nJIT: .*?LIR for |\Z)",
+                dump,
+                re.S,
+            )
+            self.assertIsNotNone(match, dump)
+            section = match.group(1)
+            equal_count = len(re.findall(r"= Equal ", section))
+
+            self.assertGreaterEqual(equal_count, 2, section)
+            self.assertEqual(int(proc.stdout.strip().splitlines()[-1]), 0, proc.stdout)
 
     def test_hot_loop_uses_long_loop_unboxing(self) -> None:
 

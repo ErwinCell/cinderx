@@ -3318,9 +3318,50 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
       }
       case Opcode::kIsTruthy: {
         auto is_truthy = static_cast<const IsTruthy*>(&i);
+        auto* src_reg = i.GetOperand(0);
+        Instruction* src = bbb.getDefInstr(src_reg);
+
+        if (src_reg->type() <= TBool) {
+          bbb.appendInstr(
+              i.output(),
+              Instruction::kEqual,
+              src,
+              Imm{reinterpret_cast<uint64_t>(Py_True), OperandBase::kObject});
+          break;
+        }
+
+        auto bool_fast = bbb.allocateBlock();
+        auto slow_path = bbb.allocateBlock();
+        auto done = bbb.allocateBlock();
+
+        Instruction* obj_type = bbb.appendInstr(
+            Instruction::kMove, OutVReg{}, Ind{src, offsetof(PyObject, ob_type)});
+        Instruction* is_bool = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            obj_type,
+            Imm{reinterpret_cast<uint64_t>(&PyBool_Type), OperandBase::kObject});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_bool, bool_fast, slow_path);
+
+        bbb.switchBlock(bool_fast);
+        Instruction* bool_result = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            src,
+            Imm{reinterpret_cast<uint64_t>(Py_True), OperandBase::kObject});
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        bbb.switchBlock(slow_path);
         Instruction* call_instr = bbb.appendCallInstruction(
-            i.output(), PyObject_IsTrue, i.GetOperand(0));
+            OutVReg{OperandBase::k8bit}, PyObject_IsTrue, src_reg);
         appendGuard(bbb, InstrGuardKind::kNotNegative, *is_truthy, call_instr);
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        bbb.switchBlock(done);
+        Instruction* phi = bbb.appendInstr(i.output(), Instruction::kPhi);
+        phi->addOperands(Lbl(bool_fast), VReg(bool_result));
+        phi->addOperands(Lbl(slow_path), VReg(call_instr));
         break;
       }
       case Opcode::kImportFrom: {
@@ -3701,6 +3742,9 @@ void LIRGenerator::resolvePhiOperands(
 
   for (auto& block : basic_blocks_) {
     block->foreachPhiInstr([&](Instruction* instr) {
+      if (instr->origin() == nullptr || !instr->origin()->IsPhi()) {
+        return;
+      }
       auto hir_instr = static_cast<const Phi*>(instr->origin());
       for (size_t i = 0; i < hir_instr->NumOperands(); ++i) {
         hir::BasicBlock* hir_block = hir_instr->basic_blocks().at(i);
