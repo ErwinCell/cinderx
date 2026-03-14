@@ -3371,3 +3371,77 @@ Conclusion:
   - the generic `VectorCall` path is gone
   - the specialized builtin version is now faster than the manual ternary baseline on ARM
 - the final implementation intentionally does not use `DoubleBinaryOp<Min/Max>` because that would break Python builtin semantics around NaN, signed zero, and object identity
+
+## 2026-03-14 Issue 36: inline set(genexpr) into set-style loop
+
+### Scope
+- Added a builder-time rewrite for builtin `set(<genexpr>)`
+- The rewrite now handles:
+  - simple generator expressions
+  - closure-capturing generator expressions like `set(vec[i] + i for i in cols)`
+- The current implementation rewrites the inner generator call into:
+  - `MakeSet`
+  - `InvokeIterNext`
+  - per-element body
+  - `SetSetItem`
+
+### Remote validation
+- Host:
+  - `124.70.162.35`
+- Working tree:
+  - `/root/work/cinderx-git`
+- Runtime regressions:
+  - `test_set_genexpr_eliminates_generator_call`
+  - `test_set_genexpr_with_closure_eliminates_generator_call`
+  - result: both `OK`
+- Existing regression re-run:
+  - `test_list_annotation_enables_exact_slice_and_item_specialization`
+  - result: `OK`
+
+### final HIR
+- `set(i * 2 for i in range(8))` no longer goes through:
+  - `CallMethod` to create a generator object
+  - outer `VectorCall(set, gen_obj)`
+- It now contains:
+  - `MakeSet`
+  - `InvokeIterNext`
+  - `SetSetItem`
+- Closure case `set(vec[i] + i for i in cols)` also lowers to a flat set loop and removes `CallMethod`.
+
+### limitation
+- `MakeFunction` still remains in the outer function.
+- So this is a partial lowering:
+  - generator-object creation is removed
+  - function-object creation is not yet removed
+- A fuller second stage would need to avoid `MAKE_FUNCTION` itself.
+
+### second stage
+- Added `MakeFunctionConstFold` for no-closure `<genexpr>` helpers.
+- This removes the remaining simple-case `MakeFunction` by replacing it with a constant function object after the builder rewrite.
+- Closure-bearing genexprs still keep `MakeFunction`.
+
+### benchmark
+- Remote JITed microbenchmark:
+  - `set(i * 2 for i in range(8))`
+  - `{i * 2 for i in range(8)}`
+- Current median:
+  - genexpr: `0.1674330570967868s`
+  - setcomp: `0.16612694202922285s`
+- Interpretation:
+  - simple `set(genexpr)` is now effectively at parity with setcomp
+  - remaining opportunity is concentrated in closure cases
+
+### base comparison
+- Clean base worktree:
+  - `/root/work/cinderx-issue36-base`
+  - built from `origin/bench-cur-7c361dce`
+- Same remote compare script results:
+  - current `set(genexpr)`: `0.1674330570967868s`
+  - base `set(genexpr)`: `1.0065587260760367s`
+  - speedup: about `6.01x`
+  - current setcomp: `0.16612694202922285s`
+  - base setcomp: `0.2993291780585423s`
+- Direct `n_queens(8)` benchmark:
+  - current: `1.3242973680607975s`
+  - base: `1.5738149019889534s`
+  - speedup: about `15.9%`

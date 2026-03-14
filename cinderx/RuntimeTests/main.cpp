@@ -18,6 +18,7 @@
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
 #include "cinderx/Jit/hir/list_slice_cleanup.h"
 #include "cinderx/Jit/hir/long_loop_unboxing.h"
+#include "cinderx/Jit/hir/make_function_const_fold.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
@@ -71,6 +72,7 @@ class TestPassRegistry {
     addPass(jit::hir::InlineFunctionCalls::Factory);
     addPass(jit::hir::ListSliceCleanup::Factory);
     addPass(jit::hir::LongLoopUnboxing::Factory);
+    addPass(jit::hir::MakeFunctionConstFold::Factory);
     addPass(jit::hir::Simplify::Factory);
     addPass(jit::hir::DeadCodeElimination::Factory);
     addPass(jit::hir::GuardTypeRemoval::Factory);

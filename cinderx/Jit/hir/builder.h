@@ -140,6 +140,13 @@ class HIRBuilder {
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitAnyCall(
+      Function& irfunc,
+      CFG& cfg,
+      TranslationContext& tc,
+      jit::BytecodeInstructionBlock::Iterator& bc_it,
+      const jit::BytecodeInstructionBlock& bc_instrs);
+  bool tryInlineSetGenexprCall(
+      Function& irfunc,
       CFG& cfg,
       TranslationContext& tc,
       jit::BytecodeInstructionBlock::Iterator& bc_it,
@@ -431,6 +438,9 @@ class HIRBuilder {
   void emitSetAdd(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
+  void emitInlineSetGenexprYield(
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr);
   void emitSetUpdate(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
@@ -484,6 +494,21 @@ class HIRBuilder {
   void emitStoreGlobal(
       TranslationContext& tc,
       const BytecodeInstruction& bc_instr);
+  Register* findFunctionClosure(BasicBlock* block, Register* func);
+  bool inlineSetGenexpr(
+      Function& irfunc,
+      CFG& cfg,
+      TranslationContext& tc,
+      Register* genfunc,
+      Register* iterable,
+      Register* closure_tuple);
+  InlineResult inlineGenexprHIR(
+      Function* caller,
+      FrameState* caller_frame_state,
+      BorrowedRef<PyCodeObject> gen_code,
+      Register* iterable,
+      Register* closure_tuple,
+      Register* collector);
 
   BorrowedRef<> constArg(const jit::BytecodeInstruction& bc_instr);
 
@@ -560,6 +585,10 @@ class HIRBuilder {
   Register* kwnames_{nullptr};
 
   OperandStack static_method_stack_;
+  Register* inline_genexpr_collector_{nullptr};
+  Register* inline_genexpr_closure_{nullptr};
+  BasicBlock* inline_genexpr_exit_{nullptr};
+  std::vector<std::unique_ptr<FrameState>> inline_genexpr_parent_frames_;
 };
 
 } // namespace jit::hir

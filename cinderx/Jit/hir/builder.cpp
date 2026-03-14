@@ -30,6 +30,7 @@
 #include "cinderx/module_state.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 #include <deque>
 #include <memory>
@@ -346,6 +347,81 @@ bool codeHasBackedge(BorrowedRef<PyCodeObject> code) {
     }
   }
   return false;
+}
+
+Register* chaseAssign(Register* reg) {
+  while (reg != nullptr && reg->instr()->IsAssign()) {
+    reg = reg->instr()->GetOperand(0);
+  }
+  return reg;
+}
+
+bool isBuiltinSetType(Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr) {
+    return false;
+  }
+  if (reg->instr()->IsGuardIs()) {
+    auto* guard = static_cast<GuardIs*>(reg->instr());
+    return guard->target() == reinterpret_cast<PyObject*>(&PySet_Type);
+  }
+  if (reg->instr()->IsLoadConst()) {
+    auto* load = static_cast<LoadConst*>(reg->instr());
+    return load->type().asObject() ==
+        reinterpret_cast<PyObject*>(&PySet_Type);
+  }
+  return reg->type().asObject() ==
+      reinterpret_cast<PyObject*>(&PySet_Type);
+}
+
+bool isNullSentinel(Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr) {
+    return false;
+  }
+  if (reg->type() <= TNullptr) {
+    return true;
+  }
+  if (reg->instr()->IsLoadConst()) {
+    return static_cast<LoadConst*>(reg->instr())->type() <= TNullptr;
+  }
+  return false;
+}
+
+BorrowedRef<PyCodeObject> getMakeFunctionCode(Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr || !reg->instr()->IsMakeFunction()) {
+    return nullptr;
+  }
+  Register* code = reg->instr()->GetOperand(0);
+  code = chaseAssign(code);
+  if (code == nullptr) {
+    return nullptr;
+  }
+  PyObject* obj = nullptr;
+  if (code->instr()->IsLoadConst()) {
+    obj = static_cast<LoadConst*>(code->instr())->type().asObject();
+  } else if (code->type().hasObjectSpec()) {
+    obj = code->type().objectSpec();
+  }
+  if (obj == nullptr) {
+    return nullptr;
+  }
+  return PyCode_Check(obj) ? reinterpret_cast<PyCodeObject*>(obj) : nullptr;
+}
+
+bool isInlineableSetGenexprCode(BorrowedRef<PyCodeObject> code) {
+  if (code == nullptr || !(code->co_flags & kCoFlagsAnyGenerator) ||
+      code->co_argcount != 1 || numCellvars(code) != 0) {
+    return false;
+  }
+
+  const char* name = PyUnicode_AsUTF8(code->co_name);
+  if (name == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  return std::strcmp(name, "<genexpr>") == 0;
 }
 
 } // namespace
@@ -754,6 +830,17 @@ BasicBlock* HIRBuilder::buildHIRImpl(
 
   addLoadArgs(entry_tc, preloader_.numArgs());
 
+  if (inline_genexpr_exit_ != nullptr) {
+    for (int i = preloader_.numArgs();
+         i < static_cast<int>(entry_tc.frame.localsplus.size());
+         ++i) {
+      Register* reg = entry_tc.frame.localsplus[i];
+      if (reg != nullptr) {
+        entry_tc.emit<LoadConst>(reg, TNullptr);
+      }
+    }
+  }
+
   // Consider checking if the code object or preloader uses runtime func and
   // drop the frame_state == nullptr check.  Inlined functions should load a
   // const instead of using LoadCurrentFunc.
@@ -884,6 +971,9 @@ void HIRBuilder::translate(
     auto tc = std::move(queue.front());
     queue.pop_front();
     if (processed.contains(tc.block)) {
+      continue;
+    }
+    if (!block_map_.bc_blocks.contains(tc.block)) {
       continue;
     }
     processed.emplace(tc.block);
@@ -1018,7 +1108,7 @@ void HIRBuilder::translate(
         case INVOKE_FUNCTION:
         case INVOKE_METHOD:
         case INVOKE_NATIVE: {
-          emitAnyCall(irfunc.cfg, tc, bc_it, bc_instrs);
+          emitAnyCall(irfunc, irfunc.cfg, tc, bc_it, bc_instrs);
           break;
         }
         case CALL_INTRINSIC_1:
@@ -1027,6 +1117,9 @@ void HIRBuilder::translate(
           break;
         }
         case RESUME: {
+          if (inline_genexpr_exit_ != nullptr) {
+            break;
+          }
           emitResume(irfunc.cfg, tc, bc_instr);
           break;
         }
@@ -1260,6 +1353,9 @@ void HIRBuilder::translate(
           tc.frame.stack.pop();
           break;
         case POP_TOP: {
+          if (inline_genexpr_exit_ != nullptr) {
+            break;
+          }
           tc.frame.stack.pop();
           break;
         }
@@ -1289,6 +1385,11 @@ void HIRBuilder::translate(
           break;
         }
         case RETURN_VALUE: {
+        if (inline_genexpr_exit_ != nullptr) {
+          tc.frame.stack.pop();
+          tc.emit<Branch>(inline_genexpr_exit_);
+          break;
+        }
           JIT_CHECK(
               tc.frame.block_stack.isEmpty(),
               "Returning with non-empty block stack");
@@ -1481,6 +1582,10 @@ void HIRBuilder::translate(
           break;
         }
         case YIELD_VALUE: {
+          if (inline_genexpr_exit_ != nullptr) {
+            emitInlineSetGenexprYield(tc, bc_instr);
+            break;
+          }
           emitYieldValue(tc, bc_instr);
           break;
         }
@@ -1589,6 +1694,9 @@ void HIRBuilder::translate(
           break;
         }
         case RETURN_GENERATOR: {
+          if (inline_genexpr_exit_ != nullptr) {
+            break;
+          }
           auto out = temps_.AllocateStack();
           if constexpr (
               PY_VERSION_HEX < 0x030C0000 || PY_VERSION_HEX >= 0x030E0000) {
@@ -1987,11 +2095,15 @@ void HIRBuilder::emitPushNull(TranslationContext& tc) {
 }
 
 void HIRBuilder::emitAnyCall(
+    Function& irfunc,
     CFG& cfg,
     TranslationContext& tc,
     jit::BytecodeInstructionBlock::Iterator& bc_it,
     const jit::BytecodeInstructionBlock& bc_instrs) {
   BytecodeInstruction bc_instr = *bc_it;
+  if (tryInlineSetGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
+    return;
+  }
   bool is_awaited;
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     is_awaited = false;
@@ -2106,6 +2218,189 @@ void HIRBuilder::emitAnyCall(
 
     tc.block = post_await_block.block;
   }
+}
+
+Register* HIRBuilder::findFunctionClosure(BasicBlock* block, Register* func) {
+  func = chaseAssign(func);
+  if (block == nullptr || func == nullptr) {
+    return nullptr;
+  }
+
+  for (auto it = block->rbegin(); it != block->rend(); ++it) {
+    if (!it->IsSetFunctionAttr()) {
+      continue;
+    }
+    auto* set_attr = static_cast<SetFunctionAttr*>(&*it);
+    if (set_attr->field() == FunctionAttr::kClosure &&
+        chaseAssign(set_attr->base()) == func) {
+      return set_attr->value();
+    }
+  }
+  return nullptr;
+}
+
+InlineResult HIRBuilder::inlineGenexprHIR(
+    Function* caller,
+    FrameState* caller_frame_state,
+    BorrowedRef<PyCodeObject> gen_code,
+    Register* iterable,
+    Register* closure_tuple,
+    Register* collector) {
+  auto preloader = Preloader::makePreloader(
+      gen_code,
+      preloader_.builtins(),
+      preloader_.globals(),
+      nullptr,
+      preloader_.fullname());
+  if (preloader == nullptr) {
+    PyErr_Clear();
+    return {};
+  }
+
+  HIRBuilder inner_builder(*preloader);
+  inner_builder.inline_genexpr_collector_ = collector;
+  inner_builder.inline_genexpr_closure_ = closure_tuple;
+  inner_builder.inline_genexpr_exit_ = caller->cfg.AllocateBlock();
+
+  inline_genexpr_parent_frames_.push_back(
+      std::make_unique<FrameState>(*caller_frame_state));
+  FrameState* caller_frame = inline_genexpr_parent_frames_.back().get();
+  BasicBlock* entry_block =
+      inner_builder.buildHIRImpl(caller, caller_frame);
+
+  std::vector<BasicBlock*> worklist{entry_block};
+  std::unordered_set<BasicBlock*> reachable{entry_block};
+  for (size_t i = 0; i < worklist.size(); ++i) {
+    BasicBlock* block = worklist[i];
+    for (auto edge : block->out_edges()) {
+      BasicBlock* succ = const_cast<Edge*>(edge)->to();
+      if (succ != nullptr && reachable.emplace(succ).second) {
+        worklist.push_back(succ);
+      }
+    }
+  }
+
+  for (BasicBlock* block : worklist) {
+    for (auto it = block->begin(); it != block->end();) {
+      Instr& instr = *it;
+      ++it;
+
+      if (FrameState* fs = get_frame_state(instr)) {
+        fs->parent = nullptr;
+      }
+
+      if (instr.IsLoadArg()) {
+        auto* load_arg = static_cast<LoadArg*>(&instr);
+        if (load_arg->arg_idx() != 0) {
+          return {};
+        }
+        auto* assign = Assign::create(instr.output(), iterable);
+        instr.ReplaceWith(*assign);
+        delete &instr;
+        continue;
+      }
+
+      if (instr.IsInitialYield()) {
+        instr.unlink();
+        delete &instr;
+        continue;
+      }
+
+      if (instr.IsReturn()) {
+        auto* branch = Branch::create(inner_builder.inline_genexpr_exit_);
+        instr.ReplaceWith(*branch);
+        delete &instr;
+      }
+    }
+  }
+
+  return {entry_block, inner_builder.inline_genexpr_exit_};
+}
+
+bool HIRBuilder::inlineSetGenexpr(
+    Function& irfunc,
+    CFG& cfg,
+    TranslationContext& tc,
+    Register* genfunc,
+    Register* iterable,
+    Register* closure_tuple) {
+  BorrowedRef<PyCodeObject> gen_code = getMakeFunctionCode(genfunc);
+  if (!isInlineableSetGenexprCode(gen_code)) {
+    return false;
+  }
+
+  Register* result = temps_.AllocateStack();
+  tc.emit<MakeSet>(result, tc.frame);
+
+  InlineResult inline_result = inlineGenexprHIR(
+      &irfunc,
+      &tc.frame,
+      gen_code,
+      iterable,
+      closure_tuple,
+      result);
+  if (inline_result.entry == nullptr || inline_result.exit == nullptr) {
+    return false;
+  }
+
+  auto& stack = tc.frame.stack;
+  stack.pop();
+  stack.pop();
+  stack.pop();
+  stack.pop();
+  stack.push(result);
+  tc.emit<Branch>(inline_result.entry);
+  tc.block = inline_result.exit;
+  return true;
+}
+
+bool HIRBuilder::tryInlineSetGenexprCall(
+    Function& irfunc,
+    CFG& cfg,
+    TranslationContext& tc,
+    jit::BytecodeInstructionBlock::Iterator& bc_it,
+    const jit::BytecodeInstructionBlock& bc_instrs) {
+  BytecodeInstruction bc_instr = *bc_it;
+  if (bc_instr.opcode() != CALL || bc_instr.oparg() != 0 || kwnames_ != nullptr ||
+      tc.frame.stack.size() < 4) {
+    return false;
+  }
+
+  auto next_it = bc_it;
+  ++next_it;
+  if (next_it == bc_instrs.end()) {
+    return false;
+  }
+  BytecodeInstruction next_instr = *next_it;
+  if (next_instr.opcode() != CALL || next_instr.oparg() != 1) {
+    return false;
+  }
+
+  Register* iterable = tc.frame.stack.top();
+  Register* genfunc = tc.frame.stack.top(1);
+  Register* null_sentinel = tc.frame.stack.top(2);
+  Register* collector_func = tc.frame.stack.top(3);
+
+  if (!isNullSentinel(null_sentinel) || !isBuiltinSetType(collector_func)) {
+    return false;
+  }
+
+  BorrowedRef<PyCodeObject> gen_code = getMakeFunctionCode(genfunc);
+  if (!isInlineableSetGenexprCode(gen_code)) {
+    return false;
+  }
+
+  Register* closure_tuple = findFunctionClosure(tc.block, genfunc);
+  if (numFreevars(gen_code) != 0 && closure_tuple == nullptr) {
+    return false;
+  }
+
+  if (!inlineSetGenexpr(irfunc, cfg, tc, genfunc, iterable, closure_tuple)) {
+    return false;
+  }
+
+  bc_it = next_it;
+  return true;
 }
 
 void HIRBuilder::emitCallInstrinsic(
@@ -3209,23 +3504,37 @@ void HIRBuilder::emitCopyFreeVars(TranslationContext& tc, int nfreevars) {
   JIT_CHECK(
       nfreevars == numFreevars(code_),
       "COPY_FREE_VARS oparg doesn't match the function's freevars tuple");
-  JIT_CHECK(func_ != nullptr, "No func_ in function with freevars");
 
   Register* func_closure = temps_.AllocateNonStack();
-  tc.emit<LoadField>(
-      func_closure,
-      func_,
-      "func_closure",
-      offsetof(PyFunctionObject, func_closure),
-      TTuple);
+  if (inline_genexpr_closure_ != nullptr) {
+    tc.emit<Assign>(func_closure, inline_genexpr_closure_);
+  } else {
+    JIT_CHECK(func_ != nullptr, "No func_ in function with freevars");
+    tc.emit<LoadField>(
+        func_closure,
+        func_,
+        "func_closure",
+        offsetof(PyFunctionObject, func_closure),
+        TTuple);
+  }
   int offset = numLocalsplus(code_) - nfreevars;
   for (int i = 0; i < nfreevars; ++i) {
     Register* dst = tc.frame.localsplus[offset + i];
     JIT_CHECK(dst != nullptr, "No register for free var {}", i);
-    tc.emit<LoadTupleItem>(dst, func_closure, i);
+    if (inline_genexpr_closure_ != nullptr) {
+      Register* closure_cell = temps_.AllocateStack();
+      tc.emit<LoadTupleItem>(closure_cell, func_closure, i);
+      tc.emit<LoadCellItem>(dst, closure_cell);
+      BorrowedRef<> name = getVarname(code_, offset + i);
+      tc.emit<CheckFreevar>(dst, dst, name, tc.frame);
+    } else {
+      tc.emit<LoadTupleItem>(dst, func_closure, i);
+    }
   }
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
-    tc.emit<InitFrameCellVars>(func_, nfreevars);
+    if (inline_genexpr_closure_ == nullptr) {
+      tc.emit<InitFrameCellVars>(func_, nfreevars);
+    }
   }
 }
 
@@ -3250,6 +3559,12 @@ void HIRBuilder::emitLoadDeref(
 
   Register* src = tc.frame.localsplus[idx];
   Register* dst = temps_.AllocateStack();
+
+  if (inline_genexpr_closure_ != nullptr && idx >= PyCode_GetFirstFree(code_)) {
+    tc.emit<Assign>(dst, src);
+    tc.frame.stack.push(dst);
+    return;
+  }
 
   tc.emit<LoadCellItem>(dst, src);
 
@@ -5131,6 +5446,17 @@ void HIRBuilder::emitSetAdd(
 
   auto result = temps_.AllocateStack();
   tc.emit<SetSetItem>(result, set, v, tc.frame);
+}
+
+void HIRBuilder::emitInlineSetGenexprYield(
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& /* bc_instr */) {
+  JIT_CHECK(
+      inline_genexpr_collector_ != nullptr,
+      "inline genexpr collector should be initialized");
+  auto yielded = tc.frame.stack.pop();
+  auto result = temps_.AllocateStack();
+  tc.emit<SetSetItem>(result, inline_genexpr_collector_, yielded, tc.frame);
 }
 
 void HIRBuilder::emitSetUpdate(
