@@ -3330,10 +3330,28 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
           break;
         }
 
+        auto none_check = bbb.allocateBlock();
         auto bool_fast = bbb.allocateBlock();
+        auto bool_check = bbb.allocateBlock();
+        auto number_slot_check = bbb.allocateBlock();
+        auto mapping_check = bbb.allocateBlock();
+        auto mapping_slot_check = bbb.allocateBlock();
+        auto sequence_check = bbb.allocateBlock();
+        auto sequence_slot_check = bbb.allocateBlock();
+        auto none_fast = bbb.allocateBlock();
+        auto default_true_fast = bbb.allocateBlock();
         auto slow_path = bbb.allocateBlock();
         auto done = bbb.allocateBlock();
 
+        Instruction* is_none = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            src,
+            Imm{reinterpret_cast<uint64_t>(Py_None), OperandBase::kObject});
+        bbb.appendBranch(
+            Instruction::kCondBranch, is_none, none_fast, none_check);
+
+        bbb.switchBlock(none_check);
         Instruction* obj_type = bbb.appendInstr(
             Instruction::kMove, OutVReg{}, Ind{src, offsetof(PyObject, ob_type)});
         Instruction* is_bool = bbb.appendInstr(
@@ -3342,7 +3360,103 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             obj_type,
             Imm{reinterpret_cast<uint64_t>(&PyBool_Type), OperandBase::kObject});
         bbb.appendBranch(
-            Instruction::kCondBranch, is_bool, bool_fast, slow_path);
+            Instruction::kCondBranch, is_bool, bool_fast, bool_check);
+
+        bbb.switchBlock(bool_check);
+        Instruction* as_number = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{obj_type, offsetof(PyTypeObject, tp_as_number)});
+        Instruction* has_no_number = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            as_number,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_number,
+            mapping_check,
+            number_slot_check);
+
+        bbb.switchBlock(number_slot_check);
+        Instruction* nb_bool = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{as_number, offsetof(PyNumberMethods, nb_bool)});
+        Instruction* has_no_nb_bool = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            nb_bool,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_nb_bool,
+            mapping_check,
+            slow_path);
+
+        bbb.switchBlock(mapping_check);
+        Instruction* as_mapping = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{obj_type, offsetof(PyTypeObject, tp_as_mapping)});
+        Instruction* has_no_mapping = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            as_mapping,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_mapping,
+            sequence_check,
+            mapping_slot_check);
+
+        bbb.switchBlock(mapping_slot_check);
+        Instruction* mp_length = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{as_mapping, offsetof(PyMappingMethods, mp_length)});
+        Instruction* has_no_mp_length = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            mp_length,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_mp_length,
+            sequence_check,
+            slow_path);
+
+        bbb.switchBlock(sequence_check);
+        Instruction* as_sequence = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{obj_type, offsetof(PyTypeObject, tp_as_sequence)});
+        Instruction* has_no_sequence = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            as_sequence,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_sequence,
+            default_true_fast,
+            sequence_slot_check);
+
+        bbb.switchBlock(sequence_slot_check);
+        Instruction* sq_length = bbb.appendInstr(
+            Instruction::kMove,
+            OutVReg{},
+            Ind{as_sequence, offsetof(PySequenceMethods, sq_length)});
+        Instruction* has_no_sq_length = bbb.appendInstr(
+            Instruction::kEqual,
+            OutVReg{OperandBase::k8bit},
+            sq_length,
+            Imm{0});
+        bbb.appendBranch(
+            Instruction::kCondBranch,
+            has_no_sq_length,
+            default_true_fast,
+            slow_path);
 
         bbb.switchBlock(bool_fast);
         Instruction* bool_result = bbb.appendInstr(
@@ -3350,6 +3464,16 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             OutVReg{OperandBase::k8bit},
             src,
             Imm{reinterpret_cast<uint64_t>(Py_True), OperandBase::kObject});
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        bbb.switchBlock(none_fast);
+        Instruction* none_result =
+            bbb.appendInstr(Instruction::kMove, OutVReg{OperandBase::k8bit}, Imm{0});
+        bbb.appendBranch(Instruction::kBranch, done);
+
+        bbb.switchBlock(default_true_fast);
+        Instruction* default_true_result =
+            bbb.appendInstr(Instruction::kMove, OutVReg{OperandBase::k8bit}, Imm{1});
         bbb.appendBranch(Instruction::kBranch, done);
 
         bbb.switchBlock(slow_path);
@@ -3361,6 +3485,8 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.switchBlock(done);
         Instruction* phi = bbb.appendInstr(i.output(), Instruction::kPhi);
         phi->addOperands(Lbl(bool_fast), VReg(bool_result));
+        phi->addOperands(Lbl(none_fast), VReg(none_result));
+        phi->addOperands(Lbl(default_true_fast), VReg(default_true_result));
         phi->addOperands(Lbl(slow_path), VReg(call_instr));
         break;
       }
