@@ -1085,6 +1085,15 @@ PyObject* JITRT_Call(
   }
 
   PyThreadState* tstate = _PyThreadState_GET();
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
   PyObject* res =
       _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
 #if PY_VERSION_HEX >= 0x030C0000
@@ -1099,12 +1108,60 @@ PyObject* JITRT_Call(
   return res;
 }
 
+PyObject* JITRT_CallMethod(
+    PyObject* callable,
+    PyObject* const* args,
+    size_t nargsf,
+    PyObject* kwnames) {
+  JIT_DCHECK(
+      (nargsf & PY_VECTORCALL_ARGUMENTS_OFFSET),
+      "JITRT_CallMethod must always be called as a vectorcall");
+
+  // CallMethod always passes self-or-null in args[0].
+  if constexpr (PY_VERSION_HEX >= 0x030E0000) {
+    if (args[0] == nullptr) {
+      args += 1;
+      nargsf -= 1;
+    }
+  }
+
+  PyThreadState* tstate = _PyThreadState_GET();
+
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
+  PyObject* res =
+      _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
+#if PY_VERSION_HEX >= 0x030C0000
+  if (handle_periodic_activities_on_call(tstate, res, callable)) {
+    Py_DECREF(res);
+    return nullptr;
+  }
+#endif
+  return res;
+}
+
 PyObject* JITRT_Vectorcall(
     PyObject* callable,
     PyObject* const* args,
     size_t nargsf,
     PyObject* kwnames) {
   PyThreadState* tstate = _PyThreadState_GET();
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
   PyObject* res =
       _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
 #if PY_VERSION_HEX >= 0x030C0000

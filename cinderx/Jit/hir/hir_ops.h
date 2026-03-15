@@ -56,6 +56,7 @@ namespace jit::hir {
   V(DoubleSqrt)                        \
   V(EagerImportName)                   \
   V(EndInlinedFunction)                \
+  V(FillMethodCache)                   \
   V(FillTypeAttrCache)                 \
   V(FillTypeMethodCache)               \
   V(FloatBinaryOp)                     \
@@ -116,6 +117,8 @@ namespace jit::hir {
   V(LoadGlobal)                        \
   V(LoadMethod)                        \
   V(LoadMethodCached)                  \
+  V(LoadMethodCacheEntryType)          \
+  V(LoadMethodCacheEntryValue)         \
   V(LoadModuleAttrCached)              \
   V(LoadModuleMethodCached)            \
   V(LoadMethodSuper)                   \

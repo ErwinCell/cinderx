@@ -219,6 +219,16 @@ PyObject* JITRT_Call(
     PyObject* kwnames);
 
 /*
+ * Perform a method-shaped call where args[0] is the self-or-null value coming
+ * from a LoadMethod result.
+ */
+PyObject* JITRT_CallMethod(
+    PyObject* callable,
+    PyObject* const* args,
+    size_t nargsf,
+    PyObject* kwnames);
+
+/*
  * Performs a function call with a vectorcall. Will check and handle any
  * eval breaker events after the call.
  */

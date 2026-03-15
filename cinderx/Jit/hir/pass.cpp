@@ -195,6 +195,7 @@ Type outputType(
     case Opcode::kDictSubscr:
     case Opcode::kEagerImportName:
     case Opcode::kFillTypeAttrCache:
+    case Opcode::kFillMethodCache:
     case Opcode::kFillTypeMethodCache:
     case Opcode::kGetAIter:
     case Opcode::kGetANext:
@@ -406,8 +407,10 @@ Type outputType(
       // that this will return a non-null object.
       return TObject;
     case Opcode::kLoadTypeMethodCacheEntryType:
+    case Opcode::kLoadMethodCacheEntryType:
       return TOptType;
     case Opcode::kLoadTypeMethodCacheEntryValue:
+    case Opcode::kLoadMethodCacheEntryValue:
       return TObject;
     case Opcode::kAssign:
       return get_op_type(0);

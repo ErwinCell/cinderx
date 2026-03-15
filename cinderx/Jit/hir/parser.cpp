@@ -364,6 +364,21 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<LoadMethodCached>(dst, receiver, idx);
       break;
     }
+    case Opcode::kLoadMethodCacheEntryType: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      expect(">");
+      NEW_INSTR(LoadMethodCacheEntryType, dst, cache_id);
+      break;
+    }
+    case Opcode::kLoadMethodCacheEntryValue: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      expect(">");
+      auto receiver = ParseRegister();
+      NEW_INSTR(LoadMethodCacheEntryValue, dst, cache_id, receiver);
+      break;
+    }
     case Opcode::kLoadTupleItem: {
       expect("<");
       int idx = GetNextNameIdx();
@@ -793,6 +808,16 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       auto receiver = ParseRegister();
       instruction =
           newInstr<FillTypeAttrCache>(dst, receiver, name_idx, cache_id);
+      break;
+    }
+    case Opcode::kFillMethodCache: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      int name_idx = GetNextInteger();
+      expect(">");
+      auto receiver = ParseRegister();
+      instruction =
+          newInstr<FillMethodCache>(dst, receiver, name_idx, cache_id);
       break;
     }
     case Opcode::kLoadArrayItem: {

@@ -3,6 +3,7 @@
 #include "cinderx/Jit/codegen/gen_asm.h"
 
 #include "internal/pycore_pystate.h"
+#include "internal/pycore_object.h"
 
 #if PY_VERSION_HEX < 0x030C0000
 #include "cinder/exports.h"
@@ -20,6 +21,7 @@
 #include "cinderx/Interpreter/interpreter.h"
 #include "cinderx/Jit/codegen/arch.h"
 #include "cinderx/Jit/codegen/autogen.h"
+
 #include "cinderx/Jit/codegen/code_section.h"
 #include "cinderx/Jit/codegen/gen_asm_utils.h"
 #include "cinderx/Jit/compiled_function.h"
@@ -31,6 +33,7 @@
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/hir.h"
 #include "cinderx/Jit/hir/printer.h"
+#include "cinderx/Jit/inline_cache.h"
 #include "cinderx/Jit/jit_gdb_support.h"
 #include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/lir/dce.h"
@@ -61,6 +64,23 @@ using namespace jit::util;
 namespace jit::codegen {
 
 namespace {
+
+uint64_t getAarch64HotCallTarget(const Instruction& instr) {
+#if defined(CINDER_AARCH64)
+  if (instr.isCall() && instr.getNumInputs() > 0 && instr.getInput(0)->isImm()) {
+    return instr.getInput(0)->getConstant();
+  }
+  if (
+      instr.isYieldFrom() || instr.isYieldFromSkipInitialSend() ||
+      instr.isYieldFromHandleStopAsyncIteration()) {
+    return reinterpret_cast<uint64_t>(
+        instr.isYieldFromHandleStopAsyncIteration()
+            ? JITRT_GenSendHandleStopAsyncIteration
+            : JITRT_GenSend);
+  }
+#endif
+  return 0;
+}
 
 #define ASM_CHECK_THROW(exp)                         \
   {                                                  \
@@ -432,8 +452,7 @@ void* finalizeCode(arch::Builder& builder, std::string_view name) {
         DebugUtils::errorAsString(err))};
   }
 
-  ICodeAllocator* code_allocator =
-      cinderx::getModuleState()->code_allocator.get();
+  ICodeAllocator* code_allocator = cinderx::getModuleState()->codeAllocator();
   AllocateResult result = code_allocator->addCode(builder.code());
   if (result.error != kErrorOk) {
     throw std::runtime_error{fmt::format(
@@ -458,7 +477,7 @@ void* generateDeoptTrampoline(bool generator_mode) {
       generator_mode ? "deopt_trampoline_generators" : "deopt_trampoline";
 
   CodeHolder code;
-  ICodeAllocator* code_allocator = mod_state->code_allocator.get();
+  ICodeAllocator* code_allocator = mod_state->codeAllocator();
   ASM_CHECK(code.init(code_allocator->asmJitEnvironment()), name);
   arch::Builder a(&code);
   Annotations annot;
@@ -924,7 +943,7 @@ void* generateFailedDeferredCompileTrampoline() {
         "CinderX not initialized, cannot generate deopt trampolines"};
   }
   CodeHolder code;
-  ICodeAllocator* code_allocator = mod_state->code_allocator.get();
+  ICodeAllocator* code_allocator = mod_state->codeAllocator();
   code.init(code_allocator->asmJitEnvironment());
   arch::Builder a(&code);
   Annotations annot;
@@ -1174,8 +1193,7 @@ void* NativeGenerator::getVectorcallEntry() {
   JIT_CHECK(as_ == nullptr, "Builder should not have been initialized.");
 
   CodeHolder code;
-  ICodeAllocator* code_allocator =
-      cinderx::getModuleState()->code_allocator.get();
+  ICodeAllocator* code_allocator = cinderx::getModuleState()->codeAllocator();
   code.init(code_allocator->asmJitEnvironment());
   ThrowableErrorHandler eh;
   code.setErrorHandler(&eh);
@@ -2433,7 +2451,7 @@ Py_ssize_t NativeGenerator::giJITDataOffset() {
   Py_ssize_t python_frame_slots =
       _PyFrame_NumSlotsForCodeObject(GetFunction()->code);
   return _PyObject_VAR_SIZE(
-      cinderx::getModuleState()->gen_type, python_frame_slots);
+      cinderx::getModuleState()->genType(), python_frame_slots);
 #endif
 }
 
@@ -2835,6 +2853,7 @@ void NativeGenerator::generateCode(CodeHolder& codeholder) {
   // The body must be generated before the prologue to determine how much spill
   // space to allocate.
   auto prologue_cursor = as_->cursor();
+  planAarch64HotCallTargets();
   generateAssemblyBody(codeholder);
 
   auto epilogue_cursor = as_->cursor();
@@ -3042,6 +3061,42 @@ void NativeGenerator::generateAssemblyBody(const asmjit::CodeHolder& code) {
   }
 }
 
+void NativeGenerator::planAarch64HotCallTargets() {
+#if defined(CINDER_AARCH64)
+  auto& targets = env_.call_target_literals;
+  targets.clear();
+
+  for (lir::BasicBlock* basicblock : lir_func_->basicblocks()) {
+    if (basicblock->section() != CodeSection::kHot) {
+      continue;
+    }
+    for (auto& instr : basicblock->instructions()) {
+      uint64_t func = getAarch64HotCallTarget(*instr);
+      if (func == 0) {
+        continue;
+      }
+
+      auto it = targets.find(func);
+      if (it == targets.end()) {
+        Environ::Aarch64CallTarget target;
+        target.literal = as_->newLabel();
+        target.hot_call_count = 1;
+        targets.emplace(func, target);
+      } else {
+        it->second.hot_call_count++;
+      }
+    }
+  }
+
+  const uint32_t min_calls = sharedStubMinCalls();
+  for (auto& entry : targets) {
+    uint32_t target_min_calls =
+        isStoreAttrInvokeTarget(entry.first) ? storeAttrStubMinCalls() : min_calls;
+    entry.second.use_shared_stub = entry.second.hot_call_count >= target_min_calls;
+  }
+#endif
+}
+
 void NativeGenerator::emitAarch64CallTargetLiteralPool() {
 #if defined(CINDER_AARCH64)
   if (env_.call_target_literals.empty()) {
@@ -3050,6 +3105,149 @@ void NativeGenerator::emitAarch64CallTargetLiteralPool() {
 
   CodeSectionOverride hot_override{
       as_, as_->code(), &metadata_, CodeSection::kHot};
+
+#if PY_VERSION_HEX >= 0x030E0000 && !defined(Py_GIL_DISABLED)
+  if (env_.store_attr_invoke_stub.isValid()) {
+    auto store_attr_target = env_.call_target_literals.find(
+        reinterpret_cast<uint64_t>(jit::StoreAttrCache::invoke));
+    JIT_CHECK(
+        store_attr_target != env_.call_target_literals.end(),
+        "Missing call target literal for StoreAttrCache::invoke");
+
+    const auto& target = store_attr_target->second;
+    Label slow_path = as_->newLabel();
+    Label decref_done = as_->newLabel();
+    Label incref_done = as_->newLabel();
+
+    constexpr int kEntryTypeOffset = static_cast<int>(
+        jit::AttributeCache::entriesOffset() +
+        jit::AttributeMutator::typeOffset());
+    constexpr int kValOffsetOffset = static_cast<int>(
+        jit::AttributeCache::entriesOffset() +
+        jit::AttributeMutator::splitValOffsetOffset());
+    constexpr uint64_t kKindMask = jit::AttributeMutator::kindMask();
+    constexpr uint64_t kSplitInlineKnownOffsetKind =
+        jit::AttributeMutator::splitInlineKnownOffsetKind();
+    constexpr int kObTypeOffset = offsetof(PyObject, ob_type);
+    constexpr int kTpBasicSizeOffset = offsetof(PyTypeObject, tp_basicsize);
+    constexpr int kInlineValuesValidOffset = offsetof(PyDictValues, valid);
+    constexpr uint64_t kInlineValuesValuesOffset = offsetof(PyDictValues, values);
+    constexpr int kManagedDictOffset = MANAGED_DICT_OFFSET;
+    constexpr int kRefcountOffset = offsetof(PyObject, ob_refcnt);
+
+    ASM_CHECK(as_->align(AlignMode::kCode, 8), GetFunction()->fullname);
+    as_->bind(env_.store_attr_invoke_stub);
+
+    // x0=cache, x1=obj, x2=name, x3=value
+    as_->ldr(a64::x12, arch::ptr_offset(a64::x0, kEntryTypeOffset));
+    as_->cbz(a64::x12, slow_path);
+
+    as_->and_(a64::x13, a64::x12, kKindMask);
+    arch::cmp_immediate(as_, a64::x13, kSplitInlineKnownOffsetKind);
+    as_->b_ne(slow_path);
+
+    as_->mov(a64::x13, ~kKindMask);
+    as_->and_(a64::x13, a64::x12, a64::x13);
+    as_->ldr(a64::x14, arch::ptr_offset(a64::x1, kObTypeOffset));
+    as_->cmp(a64::x13, a64::x14);
+    as_->b_ne(slow_path);
+
+    as_->ldr(a64::x14, arch::ptr_offset(a64::x1, kManagedDictOffset));
+    as_->cbnz(a64::x14, slow_path);
+
+    as_->ldr(a64::x14, arch::ptr_offset(a64::x13, kTpBasicSizeOffset));
+    as_->add(a64::x15, a64::x1, a64::x14);
+    as_->ldrb(
+        a64::w14,
+        arch::ptr_offset(
+            a64::x15, kInlineValuesValidOffset, arch::AccessSize::k8));
+    as_->cbz(a64::w14, slow_path);
+
+    as_->ldr(a64::x14, arch::ptr_offset(a64::x0, kValOffsetOffset));
+    arch::add_immediate(as_, a64::x15, a64::x15, kInlineValuesValuesOffset);
+    as_->add(a64::x15, a64::x15, a64::x14, a64::lsl(3));
+    as_->ldr(a64::x9, a64::ptr(a64::x15));
+    as_->cbz(a64::x9, slow_path);
+
+    // INCREF(new value) before storing it into the slot.
+    as_->ldr(
+        a64::w12,
+        arch::ptr_offset(a64::x3, kRefcountOffset, arch::AccessSize::k32));
+    as_->adds(a64::w12, a64::w12, 1);
+    as_->b_mi(incref_done);
+    as_->str(
+        a64::w12,
+        arch::ptr_offset(a64::x3, kRefcountOffset, arch::AccessSize::k32));
+    as_->bind(incref_done);
+
+    as_->str(a64::x3, a64::ptr(a64::x15));
+
+    // DECREF(old value). If it reaches zero, fall through to _Py_Dealloc.
+    as_->ldr(
+        a64::w12,
+        arch::ptr_offset(a64::x9, kRefcountOffset, arch::AccessSize::k32));
+    as_->tbz(a64::w12, 31, decref_done);
+    as_->mov(a64::w0, a64::wzr);
+    as_->ret(arch::lr);
+
+    as_->bind(decref_done);
+    as_->subs(a64::w12, a64::w12, 1);
+    as_->str(
+        a64::w12,
+        arch::ptr_offset(a64::x9, kRefcountOffset, arch::AccessSize::k32));
+    Label return_ok = as_->newLabel();
+    as_->b_ne(return_ok);
+    as_->mov(a64::x0, a64::x9);
+    emitCall(env_, reinterpret_cast<uint64_t>(_Py_Dealloc), nullptr);
+    as_->bind(return_ok);
+    as_->mov(a64::w0, a64::wzr);
+    as_->ret(arch::lr);
+
+    as_->bind(slow_path);
+    as_->ldr(arch::reg_scratch_br, asmjit::a64::ptr(target.literal));
+    as_->br(arch::reg_scratch_br);
+  }
+
+  if (env_.load_module_attr_lookup_stub.isValid()) {
+    auto module_attr_target = env_.call_target_literals.find(
+        reinterpret_cast<uint64_t>(jit::LoadModuleAttrCache::lookupHelper));
+    JIT_CHECK(
+        module_attr_target != env_.call_target_literals.end(),
+        "Missing call target literal for LoadModuleAttrCache::lookupHelper");
+
+    const auto& target = module_attr_target->second;
+    Label slow_path = as_->newLabel();
+    Label done = as_->newLabel();
+
+    constexpr int kModuleOffset = jit::LoadModuleAttrCache::moduleOffset();
+    constexpr int kCacheOffset = jit::LoadModuleAttrCache::cacheOffset();
+    constexpr int kRefcountOffset = offsetof(PyObject, ob_refcnt);
+
+    ASM_CHECK(as_->align(AlignMode::kCode, 8), GetFunction()->fullname);
+    as_->bind(env_.load_module_attr_lookup_stub);
+
+    as_->ldr(a64::x12, arch::ptr_offset(a64::x0, kModuleOffset));
+    as_->cmp(a64::x12, a64::x1);
+    as_->b_ne(slow_path);
+
+    as_->ldr(a64::x12, arch::ptr_offset(a64::x0, kCacheOffset));
+    as_->cbz(a64::x12, slow_path);
+    as_->ldr(a64::x0, a64::ptr(a64::x12));
+    as_->cbz(a64::x0, slow_path);
+
+    as_->ldr(a64::w12, arch::ptr_offset(a64::x0, kRefcountOffset, arch::AccessSize::k32));
+    as_->adds(a64::w12, a64::w12, 1);
+    as_->b_mi(done);
+    as_->str(a64::w12, arch::ptr_offset(a64::x0, kRefcountOffset, arch::AccessSize::k32));
+    as_->bind(done);
+    as_->ret(arch::lr);
+
+    as_->bind(slow_path);
+    as_->ldr(arch::reg_scratch_br, asmjit::a64::ptr(target.literal));
+    as_->br(arch::reg_scratch_br);
+  }
+#endif
+
   for (const auto& entry : env_.call_target_literals) {
     const auto& target = entry.second;
     if (!target.has_shared_stub) {

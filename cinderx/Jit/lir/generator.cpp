@@ -214,6 +214,9 @@ LIRGenerator::LIRGenerator(
     const jit::hir::Function* func,
     jit::codegen::Environ* env)
     : func_(func), env_(env) {
+  for (int i = 0, n = func->env.numLoadMethodCaches(); i < n; i++) {
+    load_method_caches_.emplace_back(getContext()->allocateLoadMethodCache());
+  }
   for (int i = 0, n = func->env.numLoadTypeAttrCaches(); i < n; i++) {
     load_type_attr_caches_.emplace_back(
         getContext()->allocateLoadTypeAttrCache());
@@ -1453,6 +1456,27 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             name);
         break;
       }
+      case Opcode::kFillMethodCache: {
+        JIT_DCHECK(
+            getConfig().attr_caches,
+            "Inline caches must be enabled to use FillMethodCache");
+        auto instr = static_cast<const FillMethodCache*>(&i);
+        Instruction* name = getNameFromIdx(bbb, instr);
+        auto cache_entry = load_method_caches_.at(instr->cache_id());
+        if (getConfig().collect_attr_cache_stats) {
+          BorrowedRef<PyCodeObject> code = instr->frameState()->code;
+          cache_entry->initCacheStats(
+              PyUnicode_AsUTF8(code->co_filename),
+              PyUnicode_AsUTF8(code->co_name));
+        }
+        bbb.appendCallInstruction(
+            instr->output(),
+            LoadMethodCache::lookupHelper,
+            cache_entry,
+            instr->receiver(),
+            name);
+        break;
+      }
       case Opcode::kLoadTypeMethodCacheEntryType: {
         JIT_DCHECK(
             getConfig().attr_caches,
@@ -1476,6 +1500,28 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
         bbb.appendCallInstruction(
             instr->output(),
             LoadTypeMethodCache::getValueHelper,
+            cache,
+            instr->receiver());
+        break;
+      }
+      case Opcode::kLoadMethodCacheEntryType: {
+        JIT_DCHECK(
+            getConfig().attr_caches,
+            "Inline caches must be enabled to use LoadMethodCacheEntryType");
+        auto instr = static_cast<const LoadMethodCacheEntryType*>(&i);
+        LoadMethodCache* cache = load_method_caches_.at(instr->cache_id());
+        bbb.appendInstr(instr->output(), Instruction::kMove, MemImm{cache->typeAddr()});
+        break;
+      }
+      case Opcode::kLoadMethodCacheEntryValue: {
+        JIT_DCHECK(
+            getConfig().attr_caches,
+            "Inline caches must be enabled to use LoadMethodCacheEntryValue");
+        auto instr = static_cast<const LoadMethodCacheEntryValue*>(&i);
+        LoadMethodCache* cache = load_method_caches_.at(instr->cache_id());
+        bbb.appendCallInstruction(
+            instr->output(),
+            LoadMethodCache::getValueHelper,
             cache,
             instr->receiver());
         break;
@@ -2246,7 +2292,7 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             hir_instr.output(),
             Instruction::kVectorCall,
             // TASK(T140174965): This should be MemImm.
-            Imm{reinterpret_cast<uint64_t>(JITRT_Call)},
+            Imm{reinterpret_cast<uint64_t>(JITRT_CallMethod)},
             Imm{flags});
         for (hir::Register* arg : hir_instr.GetOperands()) {
           instr->addOperands(VReg{bbb.getDefInstr(arg)});
