@@ -2700,6 +2700,25 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             instr->GetOperand(2));
         break;
       }
+      case Opcode::kRangeSlice: {
+        auto instr = static_cast<const RangeSlice*>(&i);
+        bbb.appendCallInstruction(
+            instr->output(),
+            JITRT_RangeSlice,
+            instr->GetOperand(0),
+            instr->GetOperand(1),
+            instr->GetOperand(2));
+        break;
+      }
+      case Opcode::kRangeItem: {
+        auto instr = static_cast<const RangeItem*>(&i);
+        bbb.appendCallInstruction(
+            instr->output(),
+            JITRT_RangeItem,
+            instr->GetOperand(0),
+            instr->GetOperand(1));
+        break;
+      }
       case Opcode::kInPlaceOp: {
         auto instr = static_cast<const InPlaceOp*>(&i);
 

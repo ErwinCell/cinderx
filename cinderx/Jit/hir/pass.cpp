@@ -2,6 +2,8 @@
 
 #include "cinderx/Jit/hir/pass.h"
 
+#include "rangeobject.h"
+
 #include "cinderx/Jit/context.h"
 #include "cinderx/Jit/hir/analysis.h"
 #include "cinderx/Jit/hir/printer.h"
@@ -382,6 +384,10 @@ Type outputType(
       return TNoneType;
     case Opcode::kListSlice:
       return TMortalListExact;
+    case Opcode::kRangeSlice:
+      return Type::fromTypeExact(&PyRange_Type);
+    case Opcode::kRangeItem:
+      return TLongExact;
 
     case Opcode::kListAppend:
     case Opcode::kMergeSetUnpack:

@@ -652,6 +652,19 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       NEW_INSTR(ListSlice, dst, list, start, stop, FrameState{});
       break;
     }
+    case Opcode::kRangeSlice: {
+      auto range = ParseRegister();
+      auto start = ParseRegister();
+      auto stop = ParseRegister();
+      NEW_INSTR(RangeSlice, dst, range, start, stop, FrameState{});
+      break;
+    }
+    case Opcode::kRangeItem: {
+      auto range = ParseRegister();
+      auto index = ParseRegister();
+      NEW_INSTR(RangeItem, dst, range, index, FrameState{});
+      break;
+    }
     case Opcode::kIntConvert: {
       expect("<");
       Type type = parseType(GetNextToken());

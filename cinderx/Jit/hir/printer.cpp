@@ -658,6 +658,8 @@ static std::string format_immediates(const Function* func, const Instr& instr) {
     }
     case Opcode::kLongUnboxCompact:
     case Opcode::kListSlice:
+    case Opcode::kRangeSlice:
+    case Opcode::kRangeItem:
       return "";
     case Opcode::kLoadTypeAttrCacheEntryType: {
       const auto& i = static_cast<const LoadTypeAttrCacheEntryType&>(instr);

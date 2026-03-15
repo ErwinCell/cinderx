@@ -23,6 +23,7 @@
 #include "cinderx/Immortalize/immortalize.h"
 #include "cinderx/StaticPython/classloader.h"
 #include "cinderx/UpstreamBorrow/borrowed.h"
+#include "rangeobject.h"
 
 #if PY_VERSION_HEX >= 0x030E0000
 #include "internal/pycore_stackref.h"
@@ -42,6 +43,37 @@
 #endif
 
 #include <cmath>
+
+namespace {
+
+struct CiRangeObject {
+  PyObject_HEAD
+  PyObject* start;
+  PyObject* stop;
+  PyObject* step;
+  PyObject* length;
+};
+
+PyObject* genericRangeSubscr(PyObject* range, PyObject* key) {
+  return PyObject_GetItem(range, key);
+}
+
+Ref<> rangePointFromIndex(CiRangeObject* range, Py_ssize_t index) {
+  if (index == 0) {
+    return Ref<>::create(range->start);
+  }
+  Ref<> idx_obj = Ref<>::steal(PyLong_FromSsize_t(index));
+  if (idx_obj == nullptr) {
+    return nullptr;
+  }
+  Ref<> scaled = Ref<>::steal(PyNumber_Multiply(range->step, idx_obj));
+  if (scaled == nullptr) {
+    return nullptr;
+  }
+  return Ref<>::steal(PyNumber_Add(range->start, scaled));
+}
+
+} // namespace
 
 // This is mostly taken from ceval.c _PyEval_EvalCodeWithName
 // We use the same logic to turn **args, nargsf, and kwnames into
@@ -926,6 +958,96 @@ PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop) {
 
   PySlice_AdjustIndices(PyList_GET_SIZE(list), &start_index, &stop_index, 1);
   return PyList_GetSlice(list, start_index, stop_index);
+}
+
+PyObject* JITRT_RangeSlice(PyObject* range_obj, PyObject* start, PyObject* stop) {
+  JIT_DCHECK(PyRange_Check(range_obj), "Expected exact range");
+  JIT_DCHECK(
+      start == Py_None || PyLong_CheckExact(start),
+      "Expected exact int or None for slice start");
+  JIT_DCHECK(
+      stop == Py_None || PyLong_CheckExact(stop),
+      "Expected exact int or None for slice stop");
+
+  auto* range = reinterpret_cast<CiRangeObject*>(range_obj);
+  Py_ssize_t length = PyLong_AsSsize_t(range->length);
+  if (length == -1 && PyErr_Occurred()) {
+    PyErr_Clear();
+    Ref<> slice = Ref<>::steal(PySlice_New(start, stop, Py_None));
+    if (slice == nullptr) {
+      return nullptr;
+    }
+    return genericRangeSubscr(range_obj, slice);
+  }
+
+  Py_ssize_t start_index = 0;
+  Py_ssize_t stop_index = length;
+  if (start != Py_None) {
+    start_index = PyLong_AsSsize_t(start);
+    if (start_index == -1 && PyErr_Occurred()) {
+      PyErr_Clear();
+      Ref<> slice = Ref<>::steal(PySlice_New(start, stop, Py_None));
+      if (slice == nullptr) {
+        return nullptr;
+      }
+      return genericRangeSubscr(range_obj, slice);
+    }
+  }
+  if (stop != Py_None) {
+    stop_index = PyLong_AsSsize_t(stop);
+    if (stop_index == -1 && PyErr_Occurred()) {
+      PyErr_Clear();
+      Ref<> slice = Ref<>::steal(PySlice_New(start, stop, Py_None));
+      if (slice == nullptr) {
+        return nullptr;
+      }
+      return genericRangeSubscr(range_obj, slice);
+    }
+  }
+
+  PySlice_AdjustIndices(length, &start_index, &stop_index, 1);
+  Ref<> substart = rangePointFromIndex(range, start_index);
+  if (substart == nullptr) {
+    return nullptr;
+  }
+  Ref<> substop = rangePointFromIndex(range, stop_index);
+  if (substop == nullptr) {
+    return nullptr;
+  }
+  return PyObject_CallFunctionObjArgs(
+      reinterpret_cast<PyObject*>(&PyRange_Type),
+      substart.get(),
+      substop.get(),
+      range->step,
+      nullptr);
+}
+
+PyObject* JITRT_RangeItem(PyObject* range_obj, PyObject* index_obj) {
+  JIT_DCHECK(PyRange_Check(range_obj), "Expected exact range");
+  JIT_DCHECK(PyLong_CheckExact(index_obj), "Expected exact int index");
+
+  auto* range = reinterpret_cast<CiRangeObject*>(range_obj);
+  Py_ssize_t length = PyLong_AsSsize_t(range->length);
+  if (length == -1 && PyErr_Occurred()) {
+    PyErr_Clear();
+    return genericRangeSubscr(range_obj, index_obj);
+  }
+
+  Py_ssize_t index = PyLong_AsSsize_t(index_obj);
+  if (index == -1 && PyErr_Occurred()) {
+    PyErr_Clear();
+    return genericRangeSubscr(range_obj, index_obj);
+  }
+  if (index < 0) {
+    index += length;
+  }
+  if (index < 0 || index >= length) {
+    PyErr_SetString(PyExc_IndexError, "range object index out of range");
+    return nullptr;
+  }
+
+  Ref<> result = rangePointFromIndex(range, index);
+  return result.release();
 }
 
 PyObject* JITRT_LoadFunctionIndirect(PyObject** func, PyObject* descr) {

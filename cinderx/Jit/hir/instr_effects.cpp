@@ -50,6 +50,8 @@ MemoryEffects memoryEffects(const Instr& inst) {
     case Opcode::kIntConvert:
     case Opcode::kIsNegativeAndErrOccurred:
     case Opcode::kListSlice:
+    case Opcode::kRangeSlice:
+    case Opcode::kRangeItem:
     case Opcode::kLoadEvalBreaker:
     case Opcode::kLoadVarObjectSize:
     case Opcode::kLongCompare:
@@ -415,6 +417,8 @@ bool hasArbitraryExecution(const Instr& inst) {
     case Opcode::kListAppend:
     case Opcode::kListExtend:
     case Opcode::kListSlice:
+    case Opcode::kRangeSlice:
+    case Opcode::kRangeItem:
     case Opcode::kLoadArg:
     case Opcode::kLoadArrayItem:
     case Opcode::kLoadCellItem:
