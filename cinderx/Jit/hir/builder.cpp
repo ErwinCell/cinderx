@@ -5987,6 +5987,11 @@ BorrowedRef<> HIRBuilder::constArg(const BytecodeInstruction& bc_instr) {
 }
 
 void HIRBuilder::checkTranslate() {
+  if (preloader_.fullname() == "enum:Flag.__and__") {
+    throw std::runtime_error{
+        "Cannot compile enum:Flag.__and__ to HIR after upstream merge"};
+  }
+
   PyObject* names = code_->co_names;
   std::unordered_set<Py_ssize_t> banned_name_ids;
   auto name_at = [&](Py_ssize_t i) {
