@@ -256,13 +256,13 @@ PyObject* JITRT_CallWithKeywordArgs(
   return Ci_PyFunction_Vectorcall((PyObject*)func, args, nargsf, kwnames);
 }
 
-typedef JITRT_StaticCallReturn (*staticvectorcallfunc)(
+using staticvectorcallfunc = JITRT_StaticCallReturn (*)(
     PyObject* callable,
     PyObject* const* args,
     size_t nargsf,
     PyObject* kwnames);
 
-typedef JITRT_StaticCallFPReturn (*staticvectorcallfuncfp)(
+using staticvectorcallfuncfp = JITRT_StaticCallFPReturn (*)(
     PyObject* callable,
     PyObject* const* args,
     size_t nargsf,
@@ -725,7 +725,7 @@ JITRT_AllocateAndLinkGenAndInterpreterFrame(
 
   PyThreadState* tstate = PyThreadState_GET();
   JIT_DCHECK(tstate != nullptr, "thread state cannot be null");
-  auto [gen, gen_size] = cinderx::getModuleState()->jitGenFreeList()->allocate(
+  auto [gen, gen_size] = cinderx::getModuleState()->jit_gen_free_list->allocate(
       co, spill_words * sizeof(uint64_t) + sizeof(jit::GenDataFooter));
 
   gen->gi_frame_state = FRAME_CREATED;
@@ -1820,11 +1820,12 @@ PyObject* JITRT_BuildString(
   return _PyUnicode_JoinArray(empty, args, nargs);
 }
 
-JITRT_StaticCallReturn JITRT_FailedDeferredCompileShim(
-    PyFunctionObject* func,
-    PyObject** args) {
+JITRT_StaticCallReturn JITRT_FailedDeferredCompileShim(PyObject** args) {
   void* no_error = reinterpret_cast<void*>(1);
 
+  // The function object is always the first argument in the static calling
+  // convention.
+  PyFunctionObject* func = reinterpret_cast<PyFunctionObject*>(args[0]);
   PyCodeObject* code = (PyCodeObject*)func->func_code;
   int total_args = code->co_argcount;
   if (code->co_flags & CO_VARARGS) {

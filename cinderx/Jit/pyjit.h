@@ -53,10 +53,8 @@ bool scheduleJitCompile(BorrowedRef<PyFunctionObject> func);
  * JIT compile func and patch its entry point.
  *
  * On success, positional only calls to func will use the JIT compiled version.
- *
- * Returns PYJIT_RESULT_OK on success.
  */
-_PyJIT_Result compileFunction(BorrowedRef<PyFunctionObject> func);
+Result compileFunction(BorrowedRef<PyFunctionObject> func);
 
 /*
  * Preload a function, along with any functions that it calls that we might want
@@ -85,18 +83,15 @@ void typeModified(BorrowedRef<PyTypeObject> type);
 void typeNameModified(BorrowedRef<PyTypeObject> type);
 
 // Exposed for unit tests
-_PyJIT_Result compilePreloaderImpl(
+Result compilePreloaderImpl(
     jit::CompilerContext<Compiler>* jit_ctx,
     const hir::Preloader& preloader,
     BorrowedRef<PyFunctionObject> func);
 
 } // namespace jit
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #if PY_VERSION_HEX < 0x030C0000
+
 /*
  * Send into/resume a suspended JIT generator and return the result.
  */
@@ -147,8 +142,5 @@ PyObject* _PyJIT_GetBuiltins(PyThreadState* tstate);
  * PyFrameObjects for any jitted functions on the call stack.
  */
 PyFrameObject* _PyJIT_GetFrame(PyThreadState* tstate);
-#endif
 
-#ifdef __cplusplus
-} // extern "C"
 #endif

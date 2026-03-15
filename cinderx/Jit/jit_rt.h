@@ -20,15 +20,15 @@ struct JitGenObject;
 // static->static call convention for primitive returns is to return error flag
 // in rdx (null means error occurred); for C helpers that need to implement this
 // convention, returning this struct will fill the right registers
-typedef struct {
+struct JITRT_StaticCallReturn {
   void* rax;
   void* rdx;
-} JITRT_StaticCallReturn;
+};
 
-typedef struct {
+struct JITRT_StaticCallFPReturn {
   double xmm0;
   double xmm1;
-} JITRT_StaticCallFPReturn;
+};
 
 #if PY_VERSION_HEX < 0x030C0000
 /*
@@ -493,10 +493,11 @@ PyObject* JITRT_UnpackExToTuple(
  * work in this function would have to be done anyway if we were initially
  * making a JIT static -> non-JIT static function anyway, so there is not too
  * much overhead.
+ *
+ * The function object is obtained from args[0] since in the static calling
+ * convention the function is always the first argument.
  */
-JITRT_StaticCallReturn JITRT_FailedDeferredCompileShim(
-    PyFunctionObject* func,
-    PyObject** args);
+JITRT_StaticCallReturn JITRT_FailedDeferredCompileShim(PyObject** args);
 
 JITRT_StaticCallReturn JITRT_CallStaticallyWithPrimitiveSignature(
     PyFunctionObject* func,
