@@ -241,6 +241,15 @@ PyObject* JITRT_Vectorcall(
     PyObject* kwnames);
 
 /*
+ * Call an exact method descriptor with METH_FASTCALL and a single explicit
+ * argument, then handle periodic activities like JITRT_Vectorcall().
+ */
+PyObject* JITRT_CallMethodDescrFast1(
+    PyObject* callable,
+    PyObject* self,
+    PyObject* arg0);
+
+/*
  * Perform a method lookup on an object.
  */
 LoadMethodResult JITRT_GetMethod(PyObject* obj, PyObject* name);

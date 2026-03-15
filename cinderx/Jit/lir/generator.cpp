@@ -386,6 +386,22 @@ bool LIRGenerator::TranslateSpecializedCall(
   // will not have their vectorcall entry points modified by the JIT, so it
   // always makes sense to load them at JIT-time and burn them directly into
   // code.
+  if (type == &PyMethodDescr_Type) {
+    auto* method = reinterpret_cast<PyMethodDescrObject*>(callee);
+    if ((hir_instr.flags() & CallFlags::Static) &&
+        method->d_method->ml_flags == METH_FASTCALL &&
+        hir_instr.numArgs() == 2) {
+      bbb.appendCallInstruction(
+          hir_instr.output(),
+          JITRT_CallMethodDescrFast1,
+          hir_instr.func(),
+          hir_instr.arg(0),
+          hir_instr.arg(1));
+      return true;
+    }
+    return false;
+  }
+
   if (type != &PyCFunction_Type) {
     return false;
   }

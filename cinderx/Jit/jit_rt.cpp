@@ -1241,6 +1241,31 @@ PyObject* JITRT_Vectorcall(
   return res;
 }
 
+PyObject* JITRT_CallMethodDescrFast1(
+    PyObject* callable,
+    PyObject* self,
+    PyObject* arg0) {
+  JIT_DCHECK(
+      Py_IS_TYPE(callable, &PyMethodDescr_Type),
+      "expected method descriptor");
+  auto* method = reinterpret_cast<PyMethodDescrObject*>(callable);
+  JIT_DCHECK(
+      method->d_method->ml_flags == METH_FASTCALL,
+      "expected METH_FASTCALL descriptor");
+
+  PyObject* args[1] = {arg0};
+  auto cfunc = _PyCFunctionFast_CAST(method->d_method->ml_meth);
+  PyObject* res = cfunc(self, args, /*nargs=*/1);
+#if PY_VERSION_HEX >= 0x030C0000
+  PyThreadState* tstate = _PyThreadState_GET();
+  if (handle_periodic_activities_on_call(tstate, res, callable)) {
+    Py_DECREF(res);
+    return nullptr;
+  }
+#endif
+  return res;
+}
+
 PyObject* JITRT_UnaryNot(PyObject* value) {
   int res = PyObject_IsTrue(value);
   if (res == 0) {
