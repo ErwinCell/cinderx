@@ -1979,7 +1979,7 @@ LIRGenerator::TranslatedBlock LIRGenerator::TranslateOneBasicBlock(
             "GuardModuleAttrValue requires a builtin module receiver");
         BorrowedRef<PyUnicodeObject> name{instr->name()};
         auto cache =
-            cinderx::getModuleState()->cacheManager()->getGlobalCache(
+            cinderx::getModuleState()->cache_manager->getGlobalCache(
                 dict, dict, name);
         Instruction* value = bbb.appendInstr(
             OutVReg{OperandBase::k64bit}, Instruction::kMove, MemImm{cache});

@@ -67,7 +67,7 @@ bool isJitFrame(_PyInterpreterFrame* frame) {
   if (func_obj == nullptr || !PyFunction_Check(func_obj)) {
     return false;
   }
-  auto* jit_ctx = cinderx::getModuleState()->jitContext();
+  auto* jit_ctx = cinderx::getModuleState()->jit_context.get();
   if (jit_ctx == nullptr) {
     return false;
   }
