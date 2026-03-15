@@ -2592,6 +2592,12 @@ static Register* simplifyVectorCallBuiltinMinMax(
 
   Register* lhs = instr->arg(0);
   Register* rhs = instr->arg(1);
+  // Leave obviously integral clamp-style shapes on the generic path instead
+  // of forcing them through the float fast path and deopting immediately.
+  if ((lhs->isA(TLongExact) || rhs->isA(TLongExact)) &&
+      !lhs->isA(TFloatExact) && !rhs->isA(TFloatExact)) {
+    return nullptr;
+  }
   if (!lhs->isA(TFloatExact)) {
     lhs = env.emit<GuardType>(TFloatExact, lhs, *instr->frameState());
   }

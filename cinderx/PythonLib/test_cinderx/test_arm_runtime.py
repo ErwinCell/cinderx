@@ -702,6 +702,203 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertLessEqual(int(lines[-2]), 3, proc.stdout)
             self.assertEqual(float(lines[-1]), 32.0, proc.stdout)
 
+    def test_polymorphic_method_load_avoids_method_with_values_deopts(self) -> None:
+        # Regression guard:
+        # method-with-values lowering should not pin polymorphic receiver call
+        # sites to a single exact type and then deopt repeatedly.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Sphere:
+                def intersectionTime(self):
+                    return 1
+
+            class Halfspace:
+                def intersectionTime(self):
+                    return 2
+
+            def invoke(obj):
+                return obj.intersectionTime()
+
+            s = Sphere()
+            h = Halfspace()
+
+            # Seed the interpreter specialization from a monomorphic shape first.
+            for _ in range(20000):
+                invoke(s)
+
+            assert jit.force_compile(invoke)
+            counts = cinderjit.get_function_hir_opcode_counts(invoke)
+
+            jit.get_and_clear_runtime_stats()
+            total = 0
+            for i in range(20000):
+                total += invoke(s if (i & 1) == 0 else h)
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "invoke"
+            )
+
+            print(counts.get("LoadMethod", 0))
+            print(counts.get("LoadMethodCached", 0))
+            print(deopt_count)
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/polymorphic_method_load_no_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]) + int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 30000, proc.stdout)
+
+    def test_self_only_float_leaf_mixed_factor_avoids_deopts(self) -> None:
+        # Regression guard:
+        # no-backedge helpers that only read `self` attrs should not keep the
+        # issue31-style float exact guards when a non-self arg such as `factor`
+        # changes between float and int at runtime.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import json
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Vector:
+                def __init__(self, x, y, z):
+                    self.x = x
+                    self.y = y
+                    self.z = z
+
+                def scale(self, factor):
+                    return Vector(factor * self.x, factor * self.y, factor * self.z)
+
+            v = Vector(1.5, 2.5, 3.5)
+            for _ in range(20000):
+                v.scale(0.5)
+
+            assert jit.force_compile(Vector.scale)
+            jit.get_and_clear_runtime_stats()
+
+            for i in range(20000):
+                v.scale(2 if (i & 1) == 0 else 3.0)
+
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Vector.scale"
+            ]
+            print(json.dumps(relevant))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/self_only_float_leaf_mixed_factor.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            self.assertEqual(proc.stdout.strip(), "[]", proc.stdout)
+
+    def test_builtin_min_max_int_clamp_shape_avoids_float_guard_deopts(self) -> None:
+        # Regression guard:
+        # integer clamp shapes like max(0, min(255, int(...))) should not go
+        # through the float-specialized min/max path and deopt on exact ints.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import json
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def clamp(x):
+                return max(0, min(255, int(x * 255)))
+
+            for _ in range(20000):
+                clamp(0.5)
+
+            assert jit.force_compile(clamp)
+            jit.get_and_clear_runtime_stats()
+
+            total = 0
+            for i in range(20000):
+                total += clamp(0.25 if (i & 1) == 0 else 0.75)
+
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "clamp"
+            ]
+            print(json.dumps(relevant))
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/builtin_minmax_int_clamp_no_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(lines[-2], "[]", proc.stdout)
+            self.assertEqual(int(lines[-1]), 2540000, proc.stdout)
+
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
 

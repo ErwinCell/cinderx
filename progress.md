@@ -84,3 +84,131 @@
 - Smoke:
   - `python cinderx/PythonLib/test_cinderx/test_oss_quick.py` -> `Ran 3 tests ... OK`
 
+## Session Update: 2026-03-15
+
+### Task status
+- Issue31 closeout: completed
+- Scope:
+  - no new functional code changes
+  - ARM staging rebuild + closeout revalidation
+  - sync `task_plan.md`, `notes.md`, and `findings.md` to review-ready state
+
+### Remote verification summary
+- ARM staging workdir:
+  - `/root/work/frame-issue31-closeout-20260315`
+- Import path used for staging validation:
+  - `PYTHONPATH=scratch/lib.linux-aarch64-cpython-314:cinderx/PythonLib`
+- Targeted regressions:
+  - `ArmRuntimeTests.test_specialized_numeric_leaf_mixed_types_avoid_deopts`: pass
+  - `ArmRuntimeTests.test_plain_instance_other_arg_guard_eliminates_cached_attr_loads`: pass
+  - `ArmRuntimeTests.test_other_arg_inference_skips_helper_method_shapes`: pass
+
+### Performance / behavior summary
+- Issue31 A/B revalidation:
+  - `PointOther.dist`: `0.295552274096s`
+  - `PointRhs.dist`: `0.315386445029s`
+  - `PointOther` mixed probe: `0.246739777969s`
+  - `PointRhs` mixed probe: `0.276117506088s`
+- Raytrace direct benchmark:
+  - `compile_strategy=all`
+  - `prewarm_runs=1`
+  - `samples=5`
+  - median wall: `0.5452457539504394s`
+- Issue31 regression sites remain cleared:
+  - `Vector.dot`: `0`
+  - `Point.__sub__`: `0`
+  - `Sphere.intersectionTime`: `0`
+- Known remaining follow-ups:
+  - `Vector.scale`
+  - `addColours`
+
+### Delivery state
+- Issue31 is now documented as review-ready.
+- Residual raytrace deopts outside the main issue31 regression are explicitly kept out of scope for this closeout.
+
+## Session Update: 2026-03-15 (raytrace follow-up)
+
+### Task status
+- Raytrace follow-up optimization: completed for this round
+- Scope:
+  - reduce remaining `LOAD_ATTR_METHOD_WITH_VALUES` deopts after issue31 closeout
+  - keep issue31 protections intact
+  - add a targeted regression and revalidate on ARM staging
+
+### Code changes completed
+- Narrowed `LOAD_ATTR_METHOD_WITH_VALUES` lowering in `cinderx/Jit/hir/builder.cpp`:
+  - keep the fast path for stable exact receivers
+  - also keep it for true `self` receivers when the descriptor owner type has no subclasses
+  - fall back to `LoadMethod` for polymorphic unpacked-local receiver sites
+- Added ARM runtime regression:
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`
+
+### Remote verification summary
+- ARM staging workdir:
+  - `/root/work/frame-issue31-closeout-20260315`
+- Targeted regressions:
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`: pass
+  - `test_specialized_numeric_leaf_mixed_types_avoid_deopts`: pass
+  - `test_plain_instance_other_arg_guard_eliminates_cached_attr_loads`: pass
+  - `test_other_arg_inference_skips_helper_method_shapes`: pass
+
+### Performance / behavior summary
+- Raytrace direct benchmark:
+  - previous median: `0.5452457539504394s`
+  - current median: `0.5257585040526465s`
+  - previous total deopts: `257510`
+  - current total deopts: `130005`
+- Removed remaining method-load deopt family:
+  - `Scene.rayColour`
+  - `Scene._lightIsVisible`
+  - `SimpleSurface.colourAt` (`LOAD_ATTR_METHOD_WITH_VALUES`)
+- Next likely targets:
+  - `Canvas.plot`
+  - `Vector.scale`
+  - `addColours`
+  - `SimpleSurface.colourAt` instance-value path
+
+## Session Update: 2026-03-15 (raytrace follow-up 2)
+
+### Task status
+- Raytrace follow-up optimization: completed for this round
+- Scope:
+  - reduce `Canvas.plot`, `Vector.scale`, and `addColours` deopts
+  - preserve the earlier method-load fix
+  - validate on ARM staging and keep only throughput-positive changes
+
+### Code changes completed
+- Narrowed no-backedge float exact guards in `cinderx/Jit/hir/builder.cpp`:
+  - keep them only for loop-hot code or methods with inferred exact non-self args
+- Narrowed builtin `min/max` float specialization in `cinderx/Jit/hir/simplify.cpp`:
+  - skip the float fast path for obvious integral clamp shapes with exact long operands
+- Added runtime regressions:
+  - `test_self_only_float_leaf_mixed_factor_avoids_deopts`
+  - `test_builtin_min_max_int_clamp_shape_avoids_float_guard_deopts`
+
+### Remote verification summary
+- ARM staging workdir:
+  - `/root/work/frame-issue31-closeout-20260315`
+- Targeted regressions:
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`: pass
+  - `test_self_only_float_leaf_mixed_factor_avoids_deopts`: pass
+  - `test_builtin_min_max_int_clamp_shape_avoids_float_guard_deopts`: pass
+  - issue31 guard tests: pass
+
+### Performance / behavior summary
+- Raytrace direct benchmark:
+  - previous median: `0.5452457539504394s`
+  - current median: `0.5367581009631976s`
+  - previous total deopts: `257510`
+  - current total deopts: `19285`
+- Removed deopt families:
+  - `Canvas.plot`
+  - `Vector.scale`
+  - `addColours`
+- Remaining dominant deopt:
+  - `SimpleSurface.colourAt` `LOAD_ATTR_INSTANCE_VALUE`
+
+### Discarded attempt
+- Tried disabling `LOAD_ATTR_INSTANCE_VALUE` for non-leaf `self` receivers.
+- That removed the last deopt bucket but regressed raytrace to about `1.92s`, so it was not kept.
+

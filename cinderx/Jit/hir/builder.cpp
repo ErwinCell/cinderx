@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <deque>
 #include <memory>
+#include <string>
 #include <optional>
 #include <set>
 #include <unordered_set>
@@ -361,11 +362,119 @@ bool codeHasBackedge(BorrowedRef<PyCodeObject> code) {
   return false;
 }
 
+bool hasInferredNonSelfArgType(const Preloader& preloader) {
+  for (int arg_idx = 1; arg_idx < preloader.numArgs(); arg_idx++) {
+    if (preloader.inferredArgType(arg_idx).has_value()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 Register* chaseAssign(Register* reg) {
   while (reg != nullptr && reg->instr()->IsAssign()) {
     reg = reg->instr()->GetOperand(0);
   }
   return reg;
+}
+
+bool hasStableExactReceiverType(Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr) {
+    return false;
+  }
+  Type type = reg->type();
+  return type.isExact() && type.runtimePyType() != nullptr;
+}
+
+bool typeHasNoSubclasses(PyTypeObject* owner_type) {
+  PyObject* subclasses = reinterpret_cast<PyObject*>(owner_type->tp_subclasses);
+#if PY_VERSION_HEX >= 0x030C0000
+  if (owner_type->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN) {
+    PyInterpreterState* interp = PyInterpreterState_Get();
+    if (interp == nullptr) {
+      PyErr_Clear();
+      return false;
+    }
+    managed_static_type_state* state =
+        Cix_PyStaticType_GetState(interp, owner_type);
+    if (state == nullptr) {
+      return false;
+    }
+    subclasses = state->tp_subclasses;
+  }
+#endif
+  if (subclasses == nullptr) {
+    return true;
+  }
+  return PyDict_Check(subclasses) && PyDict_Size(subclasses) == 0;
+}
+
+bool receiverIsNamedSelfArg(Register* reg, BorrowedRef<PyCodeObject> code) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr || !reg->instr()->IsLoadArg()) {
+    return false;
+  }
+
+  auto* load_arg = static_cast<LoadArg*>(reg->instr());
+  if (load_arg->arg_idx() != 0) {
+    return false;
+  }
+
+  BorrowedRef<> arg0_name_obj{jit::getVarname(code, 0)};
+  if (!PyUnicode_CheckExact(arg0_name_obj)) {
+    return false;
+  }
+  const char* arg0_name = PyUnicode_AsUTF8(arg0_name_obj);
+  if (arg0_name == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  return std::strcmp(arg0_name, "self") == 0;
+}
+
+bool methodDescrOwnerHasNoSubclasses(
+    PyObject* descr,
+    BorrowedRef<PyDictObject> globals) {
+  if (!PyFunction_Check(descr)) {
+    return false;
+  }
+
+  PyObject* qualname_obj =
+      reinterpret_cast<PyFunctionObject*>(descr)->func_qualname;
+  if (!PyUnicode_CheckExact(qualname_obj)) {
+    return false;
+  }
+
+  const char* qualname = PyUnicode_AsUTF8(qualname_obj);
+  if (qualname == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+
+  const char* dot = std::strchr(qualname, '.');
+  if (dot == nullptr || dot == qualname || std::strchr(dot + 1, '.') != nullptr ||
+      std::strchr(qualname, '<') != nullptr) {
+    return false;
+  }
+
+  std::string owner_name{qualname, static_cast<size_t>(dot - qualname)};
+  BorrowedRef<> owner_obj{PyDict_GetItemString(globals, owner_name.c_str())};
+  if (owner_obj == nullptr || !PyType_Check(owner_obj)) {
+    return false;
+  }
+
+  return typeHasNoSubclasses(reinterpret_cast<PyTypeObject*>(owner_obj.get()));
+}
+
+bool canUseMethodWithValuesFastPath(
+    Register* receiver,
+    PyObject* descr,
+    BorrowedRef<PyCodeObject> code,
+    BorrowedRef<PyDictObject> globals) {
+  return hasStableExactReceiverType(receiver) ||
+      (receiverIsNamedSelfArg(receiver, code) &&
+       methodDescrOwnerHasNoSubclasses(descr, globals));
 }
 
 bool isBuiltinSetType(Register* reg) {
@@ -2606,12 +2715,14 @@ void HIRBuilder::emitBinaryOp(
   // Exact int guards on specialized numeric opcodes work well for loop-hot
   // functions, but can be actively harmful for tiny mixed-numeric leaf helpers
   // like raytrace's Vector.dot(). Keep the int guards only for code objects
-  // that actually contain a backedge. Keep float exact guards only for either
-  // loop-hot code or plain-attribute leaf methods that we deliberately allow
-  // to take the aggressive split-dict fast path.
+  // that actually contain a backedge. Keep float exact guards for either
+  // loop-hot code or the narrow issue31-style leaf methods where we inferred
+  // a stable exact non-self argument type. Self-only helpers like
+  // Vector.scale() and generic helpers like addColours() should not keep the
+  // no-backedge float exact guards.
   bool specialize_int_guards = codeHasBackedge(code_);
   bool specialize_float_guards =
-      codeHasBackedge(code_) || preloader_.allowAggressiveSplitDictLoads();
+      codeHasBackedge(code_) || hasInferredNonSelfArgType(preloader_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
@@ -3218,7 +3329,7 @@ void HIRBuilder::emitCompareOp(
   CompareOp op = static_cast<CompareOp>(compare_op);
   bool specialize_int_guards = codeHasBackedge(code_);
   bool specialize_float_guards =
-      codeHasBackedge(code_) || preloader_.allowAggressiveSplitDictLoads();
+      codeHasBackedge(code_) || hasInferredNonSelfArgType(preloader_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
@@ -3506,15 +3617,23 @@ void HIRBuilder::emitLoadAttr(
         return;
       }
       case LOAD_ATTR_METHOD_WITH_VALUES: {
+        PyObject* descr = bc_instr.cacheObj(6);
+        if (descr == nullptr) {
+          break;
+        }
+        // This lowering turns the method load into a constant descriptor plus
+        // the receiver, so keep it on exact/stable receivers or leaf-owner
+        // argument receivers. Polymorphic unpacked locals like raytrace's
+        // `o.intersectionTime(...)` should stay on LoadMethod.
+        if (!canUseMethodWithValuesFastPath(
+                receiver, descr, code_, preloader_.globals())) {
+          break;
+        }
         Register* obj_type = emit_type_version_guard(
             bc_instr.cacheU32(2), "LOAD_ATTR_METHOD_WITH_VALUES");
         emit_inline_values_valid_guard(obj_type, "LOAD_ATTR_METHOD_WITH_VALUES");
         emit_heap_keys_version_guard(
             obj_type, bc_instr.cacheU32(4), "LOAD_ATTR_METHOD_WITH_VALUES");
-        PyObject* descr = bc_instr.cacheObj(6);
-        if (descr == nullptr) {
-          break;
-        }
         Register* result = temps_.AllocateStack();
         tc.emit<LoadConst>(result, Type::fromObject(descr));
         tc.frame.stack.push(result);
