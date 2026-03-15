@@ -21,6 +21,9 @@ AUTOJIT_GATE="${AUTOJIT_GATE:-$AUTOJIT}"
 AUTOJIT_USE_JITLIST_FILTER="${AUTOJIT_USE_JITLIST_FILTER:-1}"
 AUTOJIT_EXTRA_JITLIST="${AUTOJIT_EXTRA_JITLIST:-}"
 ARM_RUNTIME_SKIP_TESTS="${ARM_RUNTIME_SKIP_TESTS:-}"
+ARM_RUNTIME_ONLY_TESTS="${ARM_RUNTIME_ONLY_TESTS:-}"
+ARM_RUNTIME_TEST_NAMES="${ARM_RUNTIME_TEST_NAMES:-}"
+FORCE_CLEAN_BUILD="${FORCE_CLEAN_BUILD:-0}"
 
 if ! [[ "$AUTOJIT_GATE" =~ ^[0-9]+$ ]]; then
   echo "ERROR: AUTOJIT_GATE must be a non-negative integer, got '$AUTOJIT_GATE'"
@@ -35,6 +38,12 @@ mkdir -p "$WORKDIR" "$INCOMING_DIR" /root/work/arm-sync
 
 RUN_ID="$(date +%Y%m%d_%H%M%S)"
 
+deactivate_if_active() {
+  if declare -F deactivate >/dev/null 2>&1; then
+    deactivate
+  fi
+}
+
 echo ">> staging extract"
 stage="$(mktemp -d /root/work/cinderx-stage.XXXXXX)"
 tar -xf "$INCOMING_DIR/cinderx-update.tar" -C "$stage"
@@ -45,8 +54,15 @@ rm -rf "$stage" "$INCOMING_DIR/cinderx-update.tar"
 
 cd "$WORKDIR"
 export CMAKE_BUILD_PARALLEL_LEVEL="$PARALLEL"
+export CINDERX_BUILD_JOBS="$PARALLEL"
 
-echo ">> build wheel (CMAKE_BUILD_PARALLEL_LEVEL=$CMAKE_BUILD_PARALLEL_LEVEL)"
+if [[ "$FORCE_CLEAN_BUILD" == "1" ]]; then
+  echo ">> clean build dirs"
+  rm -rf "$WORKDIR/scratch/temp.linux-aarch64-cpython-314" \
+         "$WORKDIR/scratch/lib.linux-aarch64-cpython-314"
+fi
+
+echo ">> build wheel (CMAKE_BUILD_PARALLEL_LEVEL=$CMAKE_BUILD_PARALLEL_LEVEL, CINDERX_BUILD_JOBS=$CINDERX_BUILD_JOBS)"
 "$PY" -m build --wheel
 WHEEL="$(ls -1t dist/cinderx-*.whl | head -n 1)"
 echo "wheel=$WHEEL"
@@ -62,11 +78,25 @@ PYTHONJIT=0 python -m pip install -q -U pip
 PYTHONJIT=0 python -m pip install -q --force-reinstall "$WHEEL"
 PYTHONJIT=0 python -m pip install -q -U pyperformance
 
+DEV_PYTHONPATH="$WORKDIR/scratch/lib.linux-aarch64-cpython-314:$WORKDIR/cinderx/PythonLib"
+export PYTHONPATH="$DEV_PYTHONPATH"
+deactivate_if_active
+
 echo ">> unittest: ARM runtime checks"
-if [[ -z "$ARM_RUNTIME_SKIP_TESTS" ]]; then
-  python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+if [[ -n "$ARM_RUNTIME_TEST_NAMES" ]]; then
+  IFS=',' read -r -a _arm_runtime_tests <<< "$ARM_RUNTIME_TEST_NAMES"
+  echo "arm_runtime_test_names=$ARM_RUNTIME_TEST_NAMES"
+  for _test_name in "${_arm_runtime_tests[@]}"; do
+    if [[ -z "$_test_name" ]]; then
+      continue
+    fi
+    echo "running: $_test_name"
+    env PYTHONPATH="$PYTHONPATH" "$PY" cinderx/PythonLib/test_cinderx/test_arm_runtime.py "$_test_name" -v
+  done
+elif [[ -z "$ARM_RUNTIME_SKIP_TESTS" && -z "$ARM_RUNTIME_ONLY_TESTS" ]]; then
+  env PYTHONPATH="$PYTHONPATH" "$PY" cinderx/PythonLib/test_cinderx/test_arm_runtime.py
 else
-  env ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" python - <<'PY'
+  env PYTHONPATH="$PYTHONPATH" ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" ARM_RUNTIME_ONLY_TESTS="$ARM_RUNTIME_ONLY_TESTS" "$PY" - <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -78,8 +108,11 @@ skip_tokens = [
     for token in os.environ.get("ARM_RUNTIME_SKIP_TESTS", "").split(",")
     if token.strip()
 ]
-if not skip_tokens:
-    raise SystemExit("ARM_RUNTIME_SKIP_TESTS is empty")
+only_tokens = [
+    token.strip()
+    for token in os.environ.get("ARM_RUNTIME_ONLY_TESTS", "").split(",")
+    if token.strip()
+]
 
 test_path = pathlib.Path("cinderx/PythonLib/test_cinderx/test_arm_runtime.py")
 spec = importlib.util.spec_from_file_location("test_arm_runtime", test_path)
@@ -103,11 +136,15 @@ def iter_tests(s):
 
 for test in iter_tests(suite):
     test_id = test.id()
+    if only_tokens and not any(token in test_id for token in only_tokens):
+        skipped.append(test_id)
+        continue
     if any(token in test_id for token in skip_tokens):
         skipped.append(test_id)
         continue
     filtered.addTest(test)
 
+print("arm_runtime_only_tokens=", only_tokens)
 print("arm_runtime_skip_tokens=", skip_tokens)
 print("arm_runtime_skipped_count=", len(skipped))
 for test_id in skipped:
@@ -124,7 +161,7 @@ echo ">> smoke: JIT is effective (compiled code executes, not just 'enabled')"
 # We verify effectiveness by:
 # 1) Run a function in interpreted mode and observe interpreted call count increases.
 # 2) Force-compile it and observe the interpreted call count stops increasing while the function still runs.
-env PYTHONJITAUTO=1000000 python - <<'PY'
+env PYTHONPATH="$PYTHONPATH" PYTHONJITAUTO=1000000 "$PY" - <<'PY'
 import cinderx
 import cinderx.jit as jit
 
@@ -164,7 +201,7 @@ assert interp1 == interp0, (interp0, interp1)
 
 print("jit-effective-ok", "compiled_size", code_size, "interp_calls", interp1)
 PY
-deactivate
+deactivate_if_active
 
 echo ">> ensure pyperformance venv exists"
 . "$DRIVER_VENV/bin/activate"
@@ -211,7 +248,7 @@ if [[ -z "$PYVENV_PATH" || ! -d "$PYVENV_PATH" ]]; then
   python -m pyperformance venv show || true
   exit 1
 fi
-deactivate
+deactivate_if_active
 
 echo ">> install wheel into pyperformance venv"
 . "$PYVENV_PATH/bin/activate"
@@ -304,12 +341,12 @@ if not skip and os.environ.get("CINDERX_DISABLE") in (None, "", "0"):
         pass
 PY
 
-deactivate
+deactivate_if_active
 
 echo ">> smoke: JIT init + generator + regex compile"
 # Keep startup smoke below known crash-prone aggressive thresholds while still
 # exercising JIT-enabled initialization in the benchmark venv.
-env PYTHONJITAUTO="$SMOKE_AUTOJIT" "$PYVENV_PATH/bin/python" -c 'g=(i for i in [1]); next(g, None); import re; re.compile("a+"); print("smoke-ok")'
+env PYTHONPATH="$PYTHONPATH" PYTHONJITAUTO="$SMOKE_AUTOJIT" "$PYVENV_PATH/bin/python" -c 'g=(i for i in [1]); next(g, None); import re; re.compile("a+"); print("smoke-ok")'
 
 if [[ "$SKIP_PYPERF" == "1" ]]; then
   echo "SKIP_PYPERF=1 set; done after smoke."
@@ -322,10 +359,11 @@ __main__:*
 EOF
 . "$DRIVER_VENV/bin/activate"
 env PYTHONJITLISTFILE=/tmp/jitlist_gate.txt PYTHONJITENABLEJITLISTWILDCARDS=1 \
+  PYTHONPATH="$PYTHONPATH" \
   python -m pyperformance run --debug-single-value -b "$BENCH" \
-    --inherit-environ PYTHONJITLISTFILE,PYTHONJITENABLEJITLISTWILDCARDS \
+    --inherit-environ PYTHONPATH,PYTHONJITLISTFILE,PYTHONJITENABLEJITLISTWILDCARDS \
     -o "/root/work/arm-sync/${BENCH}_jitlist_${RUN_ID}.json"
-deactivate
+deactivate_if_active
 
 echo ">> pyperformance gate (auto-jit, debug-single-value)"
 . "$DRIVER_VENV/bin/activate"
@@ -345,18 +383,18 @@ if [[ "$AUTOJIT_USE_JITLIST_FILTER" == "1" ]]; then
   } >"$AUTOJIT_JITLIST_FILE"
   echo "autojit_jitlist=$AUTOJIT_JITLIST_FILE"
   sed -n '1,50p' "$AUTOJIT_JITLIST_FILE"
-  env PYTHONJITAUTO="$AUTOJIT_GATE" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
+  env PYTHONPATH="$PYTHONPATH" PYTHONJITAUTO="$AUTOJIT_GATE" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
     PYTHONJITLISTFILE="$AUTOJIT_JITLIST_FILE" PYTHONJITENABLEJITLISTWILDCARDS=1 \
     python -m pyperformance run --debug-single-value -b "$BENCH" \
-      --inherit-environ PYTHONJITAUTO,PYTHONJITDEBUG,PYTHONJITLOGFILE,PYTHONJITLISTFILE,PYTHONJITENABLEJITLISTWILDCARDS \
+      --inherit-environ PYTHONPATH,PYTHONJITAUTO,PYTHONJITDEBUG,PYTHONJITLOGFILE,PYTHONJITLISTFILE,PYTHONJITENABLEJITLISTWILDCARDS \
       -o "/root/work/arm-sync/${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}.json"
 else
-  env PYTHONJITAUTO="$AUTOJIT_GATE" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
+  env PYTHONPATH="$PYTHONPATH" PYTHONJITAUTO="$AUTOJIT_GATE" PYTHONJITDEBUG=1 PYTHONJITLOGFILE="$LOG" \
     python -m pyperformance run --debug-single-value -b "$BENCH" \
-      --inherit-environ PYTHONJITAUTO,PYTHONJITDEBUG,PYTHONJITLOGFILE \
+      --inherit-environ PYTHONPATH,PYTHONJITAUTO,PYTHONJITDEBUG,PYTHONJITLOGFILE \
       -o "/root/work/arm-sync/${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}.json"
 fi
-deactivate
+deactivate_if_active
 
 if [[ ! -s "$LOG" ]]; then
   echo "ERROR: missing/empty JIT log: $LOG"

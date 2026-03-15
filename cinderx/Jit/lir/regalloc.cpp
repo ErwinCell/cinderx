@@ -630,6 +630,7 @@ void LinearScanAllocator::computeInitialYieldSpillSize(
   JIT_CHECK(
       initial_yield_spill_size_ == -1,
       "Already computed InitialYield spill size");
+  initial_yield_spill_size_ = 0;
 
   for (auto& pair : mapping) {
     const LiveInterval* interval = pair.second;

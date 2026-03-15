@@ -178,6 +178,7 @@ bool BytecodeInstruction::isReturn() const {
 
 bool BytecodeInstruction::isTerminator() const {
   switch (opcode()) {
+    case CLEANUP_THROW:
     case RAISE_VARARGS:
     case RERAISE:
       return true;

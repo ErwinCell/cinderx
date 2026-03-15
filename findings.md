@@ -3445,3 +3445,156 @@ Conclusion:
   - current: `1.3242973680607975s`
   - base: `1.5738149019889534s`
   - speedup: about `15.9%`
+## 2026-03-15 pyperformance coroutines: 3.14 coroutine HIR fix
+
+- Host: `124.70.162.35`
+- Branch/worktree: local `bench-cur-7c361dce` synced to `/root/work/cinderx-main`
+- Primary remote entry: `scripts/arm/remote_update_build_test.sh`
+
+### Root cause confirmed
+
+- The `pyperformance` `bm_coroutines` hot function
+  - `async def fibonacci(n): return await fibonacci(n - 1) + await fibonacci(n - 2)`
+  - originally failed under `jit.force_compile()` on 3.14 because the builder
+    aborted on `CLEANUP_THROW`.
+- After that blocker was removed, optimized HIR for `fibonacci` still showed the
+  immediate-await recursive calls going through the generic helper chain:
+  - `CallCFunc<JitCoro_GetAwaitableIter>`
+  - `CallCFunc<JitGen_yf>`
+  - one pair for each recursive await site
+
+### Implemented fix
+
+- `cinderx/Jit/bytecode.cpp`
+  - treat `CLEANUP_THROW` as a terminator so handler-only cleanup blocks do not
+    get merged into ordinary fallthrough blocks
+- `cinderx/Jit/hir/builder.cpp`
+  - lower `CLEANUP_THROW` blocks as deopting exception-only paths instead of
+    aborting compilation
+  - in `emitGetAwaitable()`, when the awaitable input is the fresh result of a
+    known coroutine call, bypass the generic helper path and keep the value on
+    the stack directly
+- `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+  - added `test_recursive_coroutine_fibonacci_force_compile`
+  - added `test_recursive_coroutine_immediate_await_skips_awaitable_helpers`
+- `scripts/arm/remote_update_build_test.sh`
+  - export `CINDERX_BUILD_JOBS="$PARALLEL"` so the wheel build obeys the chosen
+    parallelism
+  - added targeted ARM runtime test-name support for tighter remote validation
+  - routed benchmark/test `PYTHONPATH` through the freshly built
+    `scratch/lib...` tree for current-worktree validation
+
+### Evidence
+
+- Direct remote regression tests against the freshly built `_cinderx` in
+  `/root/work/cinderx-main/scratch/lib.linux-aarch64-cpython-314`:
+  - `ArmRuntimeTests.test_recursive_coroutine_fibonacci_force_compile`: pass
+  - `ArmRuntimeTests.test_recursive_coroutine_immediate_await_skips_awaitable_helpers`: pass
+- Optimized HIR for `__main__:fibonacci` after the fix:
+  - no `CallCFunc<JitCoro_GetAwaitableIter>`
+  - no `CallCFunc<JitGen_yf>`
+  - recursive await sites now go straight from `VectorCall` to `Send`/`YieldFrom`
+- Remote benchmark comparison on the same host:
+  - interpreter mode (`CINDERX_DISABLE=1`): about `55.4 ms`
+  - previous CinderX auto-jit (`PYTHONJITAUTO=50`, `__main__:*`): about `77.1 ms`
+  - current HIR fix with fresh scratch build on `PYTHONPATH`: about `51.4 ms`
+- Auto-jit compile log under the fixed path:
+  - `Finished compiling __main__:fibonacci in 1424µs, code size: 1544 bytes`
+
+### Remaining issue
+
+- The standard remote entry script is still inconsistent when it runs the new
+  ARM runtime tests through the wheel-installed environment: the same targeted
+  coroutine test that passes against the fresh scratch build can still abort in
+  that code path with:
+  - `JIT: ... lir/instruction.cpp:318 -- Abort`
+  - `Not a conditional branch opcode: Cqo`
+- The benchmark result above is from the freshly built current-worktree
+  `_cinderx` on `PYTHONPATH`, not from the wheel-installed runtime-test path.
+
+## 2026-03-15 follow-up: clean-build validation and current status
+
+- Additional remote validation on `124.70.162.35` established:
+  - stale incremental build directories under
+    `/root/work/cinderx-main/scratch/temp.linux-aarch64-cpython-314`
+    were causing non-deterministic backend/regalloc failures
+  - forcing a clean rebuild of scratch outputs is required for stable
+    validation on this host
+- After syncing the latest HIR + regalloc fixes and rebuilding clean:
+  - direct remote probe:
+    - `jit.force_compile(fibonacci)` succeeds
+    - direct recursive coroutine probe prints:
+      - `before`
+      - `True`
+      - `after`
+  - targeted ARM runtime tests against the fresh scratch build:
+    - `ArmRuntimeTests.test_recursive_coroutine_fibonacci_force_compile`: pass
+    - `ArmRuntimeTests.test_recursive_coroutine_immediate_await_skips_awaitable_helpers`:
+      - script body itself succeeds and final HIR dump shows the shortcut
+      - but `cinderjit.get_function_hir_opcode_counts(fibonacci)` still reports
+        `CallCFunc = 4`, which does not match the dumped final HIR
+- Latest remote benchmark with current scratch build on `PYTHONPATH`:
+  - `coroutines`: `51.8 ms`
+
+## Current assessment
+
+- The main user-facing target is substantially fixed:
+  - recursive coroutine code now compiles
+  - `pyperformance coroutines` is back near interpreter speed on the remote ARM host
+- The remaining unresolved item is narrower:
+  - reconcile the mismatch between
+    `cinderjit.get_function_hir_opcode_counts(fibonacci)` and the dumped final
+    HIR for the same function under the current build
+
+## 2026-03-15 closure: standard remote entry is now green
+
+- Remote entry:
+  - `scripts/arm/remote_update_build_test.sh`
+- Host:
+  - `124.70.162.35`
+- Entry configuration:
+  - `FORCE_CLEAN_BUILD=1`
+  - `BENCH=coroutines`
+  - `AUTOJIT=50`
+  - `ARM_RUNTIME_TEST_NAMES=ArmRuntimeTests.test_recursive_coroutine_fibonacci_force_compile,ArmRuntimeTests.test_recursive_coroutine_immediate_await_skips_awaitable_helpers`
+
+### Standard-entry validation
+
+- The standard remote entry now passes both targeted coroutine regressions in
+  the same path used by the benchmark gate:
+  - `ArmRuntimeTests.test_recursive_coroutine_fibonacci_force_compile`: `OK`
+  - `ArmRuntimeTests.test_recursive_coroutine_immediate_await_skips_awaitable_helpers`: `OK`
+- The earlier mismatch around
+  `cinderjit.get_function_hir_opcode_counts(fibonacci)` is no longer
+  reproducing in the standard-entry path, because the runtime regression that
+  asserts `CallCFunc == 0` passed under the entry script.
+
+### Standard-entry benchmark artifacts
+
+- Run id:
+  - `20260315_155519`
+- jitlist artifact:
+  - `/root/work/arm-sync/coroutines_jitlist_20260315_155519.json`
+  - value: `0.05560686998069286 s` (`55.61 ms`)
+- autojit artifact:
+  - `/root/work/arm-sync/coroutines_autojit50_20260315_155519.json`
+  - value: `0.05576617189217359 s` (`55.77 ms`)
+- autojit compile summary:
+  - `/root/work/arm-sync/coroutines_autojit50_20260315_155519_compile_summary.json`
+  - `main_compile_count = 1`
+  - `total_compile_count = 1`
+  - `other_compile_count = 0`
+- autojit compile log:
+  - `/tmp/jit_coroutines_autojit50_20260315_155519.log`
+  - contains:
+    - `emitGetAwaitable shortcut for __main__:fibonacci`
+    - `Finished compiling __main__:fibonacci in 1358µs, code size: 1504 bytes`
+
+### Final assessment
+
+- The HIR-first coroutine fix is closed for this task:
+  - recursive coroutine compilation on 3.14 is restored
+  - the fresh coroutine await path no longer falls back to the generic
+    awaitable helpers in the hot recursive shape
+  - the standard remote entry now validates correctness and benchmark behavior
+    end-to-end

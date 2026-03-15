@@ -388,6 +388,77 @@ bool isNullSentinel(Register* reg) {
   return false;
 }
 
+bool isKnownCoroutineFunction(BorrowedRef<> obj) {
+  if (obj == nullptr || !PyFunction_Check(obj)) {
+    return false;
+  }
+  auto* func = reinterpret_cast<PyFunctionObject*>(obj.get());
+  auto* code = reinterpret_cast<PyCodeObject*>(func->func_code);
+  return (code->co_flags & CO_COROUTINE) != 0;
+}
+
+BorrowedRef<> resolveKnownCallableObject(
+    const Preloader& preloader,
+    Register* callable) {
+  auto resolve_from_name_idx = [&](int name_idx) -> BorrowedRef<> {
+    BorrowedRef<> obj = preloader.global(name_idx);
+    if (obj != nullptr) {
+      return obj;
+    }
+    BorrowedRef<> name = PyTuple_GET_ITEM(preloader.code()->co_names, name_idx);
+    if (name == nullptr) {
+      return nullptr;
+    }
+    BorrowedRef<> global = PyDict_GetItem(preloader.globals(), name);
+    if (global != nullptr) {
+      return global;
+    }
+    return PyDict_GetItem(preloader.builtins(), name);
+  };
+
+  callable = chaseAssign(callable);
+  if (callable == nullptr) {
+    return nullptr;
+  }
+  if (callable->type().hasObjectSpec()) {
+    return callable->type().objectSpec();
+  }
+
+  Instr* instr = callable->instr();
+  if (instr->IsGuardIs()) {
+    return static_cast<GuardIs*>(instr)->target();
+  }
+  if (instr->IsLoadGlobalCached()) {
+    return resolve_from_name_idx(static_cast<LoadGlobalCached*>(instr)->name_idx());
+  }
+  if (instr->IsLoadGlobal()) {
+    return resolve_from_name_idx(static_cast<LoadGlobal*>(instr)->name_idx());
+  }
+  return nullptr;
+}
+
+bool isKnownCoroutineCallResult(const Preloader& preloader, Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr) {
+    return false;
+  }
+
+  Register* callable = nullptr;
+  if (reg->instr()->IsVectorCall()) {
+    callable = static_cast<VectorCall*>(reg->instr())->func();
+  } else if (reg->instr()->IsCallMethod()) {
+    callable = static_cast<CallMethod*>(reg->instr())->func();
+  } else if (reg->instr()->IsCallEx()) {
+    callable = static_cast<CallEx*>(reg->instr())->func();
+  } else {
+    return false;
+  }
+
+  BorrowedRef<> resolved = resolveKnownCallableObject(preloader, callable);
+  bool known = isKnownCoroutineFunction(resolved);
+  return known;
+}
+
 BorrowedRef<PyCodeObject> getMakeFunctionCode(Register* reg) {
   reg = chaseAssign(reg);
   if (reg == nullptr || !reg->instr()->IsMakeFunction()) {
@@ -1018,7 +1089,6 @@ void HIRBuilder::translate(
         }
       }
       prev_bc_instr = bc_instr;
-
       // Translate instruction
       auto opcode = bc_instr.opcode();
       switch (opcode) {
@@ -1750,9 +1820,16 @@ void HIRBuilder::translate(
           emitStoreGlobal(tc, bc_instr);
           break;
         }
+        case CLEANUP_THROW:
+          // 3.12+ async SEND/await exception tables can target CLEANUP_THROW.
+          // We don't model this handler path in HIR yet, so deopt back to the
+          // interpreter when it is entered. The normal non-exceptional await
+          // path remains compiled.
+          tc.emitSnapshot();
+          tc.emit<Deopt>();
+          break;
         case CHECK_EG_MATCH:
         case CHECK_EXC_MATCH:
-        case CLEANUP_THROW:
         case PUSH_EXC_INFO:
           JIT_ABORT(
               "Opcode {} ({}) should only appear in exception handlers",
@@ -1762,6 +1839,7 @@ void HIRBuilder::translate(
           JIT_ABORT("Unhandled opcode {} ({})", opcode, opcodeName(opcode));
         }
       }
+      prev_bc_instr = *bc_it;
     }
     // Insert jumps for blocks that fall through.
     auto last_instr = tc.block->GetTerminator();
@@ -5313,8 +5391,12 @@ void HIRBuilder::emitGetAwaitable(
     BytecodeInstruction bc_instr) {
   OperandStack& stack = tc.frame.stack;
   Register* iterable = stack.pop();
+  if (isKnownCoroutineCallResult(preloader_, iterable)) {
+    JIT_LOG("emitGetAwaitable shortcut for {}", preloader_.fullname());
+    stack.push(iterable);
+    return;
+  }
   Register* iter = temps_.AllocateStack();
-
   // Most work is done by existing JitPyCoro_GetAwaitableIter() utility.
   tc.emit<CallCFunc>(
       1,
