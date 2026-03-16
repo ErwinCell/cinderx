@@ -14,6 +14,7 @@
 #include "cinderx/Jit/hir/float_accumulator_promotion.h"
 #include "cinderx/Jit/hir/float_compare_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
+#include "cinderx/Jit/hir/guarded_load_elimination.h"
 #include "cinderx/Jit/hir/hir_stats.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
@@ -122,6 +123,7 @@ void Compiler::runPasses(
       hir::BuiltinLoadMethodElimination{}, PassConfig::kBuiltinLoadMethodElim);
   runSimplifyPassesIfEnabled();
   runPass(jit::hir::LongLoopUnboxing{}, irfunc, callback);
+  runPassIf(hir::GuardedLoadElimination{}, PassConfig::kGuardedLoadElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
   runPassIf(hir::DeadCodeElimination{}, PassConfig::kDeadCodeElim);
   runPassIf(hir::CleanCFG{}, PassConfig::kCleanCFG);
@@ -175,6 +177,7 @@ PassConfig createConfig() {
   set(hir_opts.clean_cfg, PassConfig::kCleanCFG);
   set(hir_opts.dynamic_comparison_elim, PassConfig::kDynamicComparisonElim);
   set(hir_opts.guard_type_removal, PassConfig::kGuardTypeRemoval);
+  set(hir_opts.guarded_load_elim, PassConfig::kGuardedLoadElim);
   // Inliner currently depends on code objects being stable.
   set(hir_opts.inliner && getConfig().stable_frame, PassConfig::kInliner);
   set(hir_opts.insert_update_prev_instr, PassConfig::kInsertUpdatePrevInstr);

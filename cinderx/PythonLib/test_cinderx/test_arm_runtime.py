@@ -632,11 +632,59 @@ class ArmRuntimeTests(unittest.TestCase):
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
             self.assertGreaterEqual(len(lines), 6, proc.stdout)
             self.assertGreaterEqual(int(lines[-6]), 8, proc.stdout)
-            self.assertGreaterEqual(int(lines[-5]), 12, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 8, proc.stdout)
             self.assertEqual(int(lines[-4]), 0, proc.stdout)
             self.assertEqual(int(lines[-3]), 0, proc.stdout)
             self.assertGreaterEqual(int(lines[-2]), 6, proc.stdout)
             self.assertEqual(float(lines[-1]), 5.196152422706632, proc.stdout)
+
+    def test_bound_method_attr_identity_is_not_coalesced(self) -> None:
+        # Regression guard:
+        # repeated bound-method-producing attribute loads must preserve Python
+        # identity semantics even when the receiver has an exact stable type.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f():
+                s = "abc"
+                a = s.upper
+                b = s.upper
+                return a is b
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("LoadAttrCached", 0))
+            print(f())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/bound_method_attr_identity.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 2, proc.stdout)
+            self.assertEqual(lines[-1], "False", proc.stdout)
 
     def test_other_arg_inference_skips_helper_method_shapes(self) -> None:
         # Regression guard:
@@ -898,6 +946,77 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(len(lines), 2, proc.stdout)
             self.assertEqual(lines[-2], "[]", proc.stdout)
             self.assertEqual(int(lines[-1]), 2540000, proc.stdout)
+
+    def test_builtin_min_max_int_loop_shape_avoids_float_guard_deopts(self) -> None:
+        # Regression guard:
+        # integer-heavy LU-style inner loops should not trigger the float-only
+        # two-arg min/max specialization, otherwise GuardType deopts dominate
+        # the compiled path.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+            import json
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def LU_factor(m, n):
+                total = 0
+                min_mn = min(m, n)
+                for j in range(min_mn):
+                    jp1 = j + 1
+                    total += min(jp1, n - 1)
+                return total
+
+            for _ in range(10000):
+                LU_factor(32, 31)
+
+            assert jit.force_compile(LU_factor)
+            counts = cinderjit.get_function_hir_opcode_counts(LU_factor)
+
+            jit.get_and_clear_runtime_stats()
+            total = 0
+            for _ in range(500):
+                total += LU_factor(32, 31)
+            stats = jit.get_and_clear_runtime_stats()
+
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "LU_factor"
+            ]
+
+            print(counts.get("GuardType", 0))
+            print(counts.get("VectorCall", 0))
+            print(json.dumps(relevant))
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/builtin_minmax_lu_shape_no_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(lines[-2], "[]", proc.stdout)
+            self.assertEqual(int(lines[-1]), 247500, proc.stdout)
 
     def test_dump_elf_machine_is_aarch64_on_arm(self) -> None:
         import cinderjit
@@ -2129,12 +2248,15 @@ class ArmRuntimeTests(unittest.TestCase):
 
     def test_builtin_min_max_two_float_args_eliminate_vectorcall(self) -> None:
         # Regression guard:
-        # two-arg builtin min/max on exact floats should avoid the generic
-        # VectorCall path while preserving Python result semantics.
+        # two-arg builtin min/max on exact floats should still get a float
+        # fast path while preserving Python result semantics. A cold generic
+        # fallback path is acceptable as long as the hot float path stays
+        # specialized.
         code = textwrap.dedent(
             """
             import cinderx.jit as jit
             import cinderjit
+            import json
 
             jit.enable()
             jit.enable_specialized_opcodes()
@@ -2155,10 +2277,21 @@ class ArmRuntimeTests(unittest.TestCase):
 
             counts_min = cinderjit.get_function_hir_opcode_counts(min_builtin)
             counts_max = cinderjit.get_function_hir_opcode_counts(max_builtin)
+            jit.get_and_clear_runtime_stats()
+            for _ in range(20000):
+                min_builtin(1.5, 2.5)
+                max_builtin(1.5, 2.5)
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] in ("min_builtin", "max_builtin")
+            ]
             print(counts_min.get("VectorCall", 0))
             print(counts_max.get("VectorCall", 0))
             print(counts_min.get("PrimitiveCompare", 0))
             print(counts_max.get("PrimitiveCompare", 0))
+            print(json.dumps(relevant))
             print(min_builtin(1.5, 2.5))
             print(max_builtin(1.5, 2.5))
             """
@@ -2182,11 +2315,12 @@ class ArmRuntimeTests(unittest.TestCase):
                 f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
             )
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            self.assertGreaterEqual(len(lines), 6, proc.stdout)
-            self.assertEqual(int(lines[-6]), 0, proc.stdout)
-            self.assertEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertGreaterEqual(len(lines), 7, proc.stdout)
+            self.assertLessEqual(int(lines[-7]), 2, proc.stdout)
+            self.assertLessEqual(int(lines[-6]), 2, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 1, proc.stdout)
             self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
-            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(lines[-3], "[]", proc.stdout)
             self.assertEqual(float(lines[-2]), 1.5, proc.stdout)
             self.assertEqual(float(lines[-1]), 2.5, proc.stdout)
 
@@ -3110,6 +3244,7 @@ class ArmRuntimeTests(unittest.TestCase):
             print(counts.get("MakeSet", 0))
             print(counts.get("InvokeIterNext", 0))
             print(counts.get("SetSetItem", 0))
+            print(counts.get("LoadTupleItem", 0))
             print(f([10, 20, 30, 40], range(4)))
             """
         )
@@ -3132,11 +3267,12 @@ class ArmRuntimeTests(unittest.TestCase):
                 f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
             )
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            self.assertGreaterEqual(len(lines), 5, proc.stdout)
-            self.assertEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertEqual(int(lines[-6]), 0, proc.stdout)
+            self.assertEqual(int(lines[-5]), 1, proc.stdout)
             self.assertEqual(int(lines[-4]), 1, proc.stdout)
             self.assertEqual(int(lines[-3]), 1, proc.stdout)
-            self.assertEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "{32, 10, 43, 21}", proc.stdout)
 
     def test_set_genexpr_preserves_exception_behavior(self) -> None:

@@ -1,0 +1,435 @@
+--- Test Suite Name ---
+GuardedLoadEliminationTest
+--- Passes ---
+GuardedLoadElimination
+--- Test Name ---
+EliminatesRedundantGuardTypeAndLoadFieldInBlock
+--- Input ---
+# HIR
+fun test {
+  bb 0 {
+    v0 = LoadArg<0>
+    v1 = GuardType<TupleExact> v0
+    v2 = GuardType<TupleExact> v0
+    v3 = LoadField<ob_type@8, Type, borrowed> v1
+    v4 = LoadField<ob_type@8, Type, borrowed> v2
+    Return v4
+  }
+}
+--- Expected 3.10 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:TupleExact = GuardType<TupleExact> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v1
+    Return v3
+  }
+}
+--- Expected 3.12 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:TupleExact = GuardType<TupleExact> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v1
+    Return v3
+  }
+}
+--- Expected 3.14 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:TupleExact = GuardType<TupleExact> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v1
+    Return v3
+  }
+}
+--- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:TupleExact = GuardType<TupleExact> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v1
+    Return v3
+  }
+}
+--- Test Name ---
+EliminatesRedundantLoadTupleItemInBlock
+--- Input ---
+# HIR
+fun test {
+  bb 0 {
+    v0 = LoadArg<0; "t", TupleExact>
+    v1 = LoadTupleItem<0> v0
+    v2 = LoadTupleItem<0> v0
+    Return v2
+  }
+}
+--- Expected 3.10 ---
+fun test {
+  bb 0 {
+    v0:TupleExact = LoadArg<0; "t", TupleExact>
+    v1:Object = LoadTupleItem<0> v0
+    Return v1
+  }
+}
+--- Expected 3.12 ---
+fun test {
+  bb 0 {
+    v0:TupleExact = LoadArg<0; "t", TupleExact>
+    v1:Object = LoadTupleItem<0> v0
+    Return v1
+  }
+}
+--- Expected 3.14 ---
+fun test {
+  bb 0 {
+    v0:TupleExact = LoadArg<0; "t", TupleExact>
+    v1:Object = LoadTupleItem<0> v0
+    Return v1
+  }
+}
+--- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:TupleExact = LoadArg<0; "t", TupleExact>
+    v1:Object = LoadTupleItem<0> v0
+    Return v1
+  }
+}
+--- Test Name ---
+EliminatesRedundantExactLoadMethodCachedInBlock
+--- Input ---
+# HIR
+fun test {
+  bb 0 {
+    v0 = LoadArg<0; "s", UnicodeExact>
+    v1 = LoadMethodCached<0; "upper"> v0
+    v2 = GetSecondOutput<OptObject> v1
+    v3 = LoadMethodCached<0; "upper"> v0
+    v4 = GetSecondOutput<OptObject> v3
+    v5 = CallMethod<2> v3 v4
+    Return v5
+  }
+}
+--- Expected 3.10 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v4:OptObject = GetSecondOutput<OptObject> v1
+    v5:Object = CallMethod<2> v1 v4 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    Return v5
+  }
+}
+--- Expected 3.12 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v4:OptObject = GetSecondOutput<OptObject> v1
+    v5:Object = CallMethod<2> v1 v4 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    Return v5
+  }
+}
+--- Expected 3.14 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v4:OptObject = GetSecondOutput<OptObject> v1
+    v5:Object = CallMethod<2> v1 v4 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    Return v5
+  }
+}
+--- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v4:OptObject = GetSecondOutput<OptObject> v1
+    v5:Object = CallMethod<2> v1 v4 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    Return v5
+  }
+}
+--- Test Name ---
+DoesNotEliminateExactLoadMethodCachedAcrossCallBarrier
+--- Input ---
+# HIR
+fun test {
+  bb 0 {
+    v0 = LoadArg<0; "s", UnicodeExact>
+    v1 = LoadMethodCached<0; "upper"> v0
+    v2 = GetSecondOutput<OptObject> v1
+    v3 = CallMethod<2> v1 v2
+    v4 = LoadMethodCached<0; "upper"> v0
+    v5 = GetSecondOutput<OptObject> v4
+    Return v5
+  }
+}
+--- Expected 3.10 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v3:Object = CallMethod<2> v1 v2 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v4:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v5:OptObject = GetSecondOutput<OptObject> v4
+    Return v5
+  }
+}
+--- Expected 3.12 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v3:Object = CallMethod<2> v1 v2 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v4:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v5:OptObject = GetSecondOutput<OptObject> v4
+    Return v5
+  }
+}
+--- Expected 3.14 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v3:Object = CallMethod<2> v1 v2 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v4:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v5:OptObject = GetSecondOutput<OptObject> v4
+    Return v5
+  }
+}
+--- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:UnicodeExact = LoadArg<0; "s", UnicodeExact>
+    v1:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v2:OptObject = GetSecondOutput<OptObject> v1
+    v3:Object = CallMethod<2> v1 v2 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v4:Object = LoadMethodCached<0; "upper"> v0 {
+      FrameState {
+        CurInstrOffset -2
+      }
+    }
+    v5:OptObject = GetSecondOutput<OptObject> v4
+    Return v5
+  }
+}
+--- Test Name ---
+DoesNotEliminateJoinLoadWithoutSingleIncomingValue
+--- Input ---
+# HIR
+fun test {
+  bb 0 {
+    v0 = LoadArg<0>
+    v1 = LoadArg<1; "cond", CBool>
+    CondBranch<1, 2> v1
+  }
+
+  bb 1 (preds 0) {
+    v2 = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v3 = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    v4 = LoadField<ob_type@8, Type, borrowed> v0
+    Return v4
+  }
+}
+--- Expected 3.10 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:CBool = LoadArg<1; "cond", CBool>
+    CondBranch<1, 2> v1
+  }
+
+  bb 1 (preds 0) {
+    v2:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    v4:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Return v4
+  }
+}
+--- Expected 3.12 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:CBool = LoadArg<1; "cond", CBool>
+    CondBranch<1, 2> v1
+  }
+
+  bb 1 (preds 0) {
+    v2:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    v4:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Return v4
+  }
+}
+--- Expected 3.14 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:CBool = LoadArg<1; "cond", CBool>
+    CondBranch<1, 2> v1
+  }
+
+  bb 1 (preds 0) {
+    v2:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    v4:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Return v4
+  }
+}
+--- Expected 3.15 ---
+fun test {
+  bb 0 {
+    v0:Object = LoadArg<0>
+    v1:CBool = LoadArg<1; "cond", CBool>
+    CondBranch<1, 2> v1
+  }
+
+  bb 1 (preds 0) {
+    v2:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 2 (preds 0) {
+    v3:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Branch<3>
+  }
+
+  bb 3 (preds 1, 2) {
+    v4:Type = LoadField<ob_type@8, Type, borrowed> v0
+    Return v4
+  }
+}
+--- End ---

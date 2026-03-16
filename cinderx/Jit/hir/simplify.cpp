@@ -760,6 +760,15 @@ Register* simplifyIsTruthy(Env& env, const IsTruthy* instr) {
 
 Register* simplifyLoadTupleItem(Env& env, const LoadTupleItem* instr) {
   Register* src = instr->GetOperand(0);
+  if (src->instr()->IsMakeTuple()) {
+    size_t length = static_cast<const MakeTuple*>(src->instr())->nvalues();
+    if (instr->idx() < length) {
+      env.emit<UseType>(src, TTupleExact);
+      return src->instr()->GetOperand(instr->idx());
+    }
+    return nullptr;
+  }
+
   Type src_ty = src->type();
   if (!src_ty.hasValueSpec(TTuple)) {
     return nullptr;
@@ -2568,6 +2577,106 @@ static Register* simplifyVectorCallBuiltinAbs(
   return env.emit<PrimitiveBox>(result, TCDouble, *instr->frameState());
 }
 
+static Register* emitGenericVectorCallClone(
+    Env& env,
+    const VectorCall* instr) {
+  auto* call = env.emitRawInstr<VectorCall>(
+      instr->NumOperands(),
+      env.func.env.AllocateRegister(),
+      instr->flags() | CallFlags::NoSpecialize,
+      *instr->frameState());
+  for (size_t i = 0; i < instr->NumOperands(); ++i) {
+    call->SetOperand(i, instr->GetOperand(i));
+  }
+  return call->output();
+}
+
+static Register* emitBuiltinMinMaxFloatFastPath(
+    Env& env,
+    Register* target,
+    Register* lhs,
+    Register* rhs,
+    const FrameState& frame,
+    bool is_min) {
+  env.emit<UseType>(target, target->type());
+  env.emit<UseType>(lhs, TFloatExact);
+  env.emit<UseType>(rhs, TFloatExact);
+
+  Register* lhs_unboxed = env.emit<PrimitiveUnbox>(lhs, TCDouble);
+  Register* rhs_unboxed = env.emit<PrimitiveUnbox>(rhs, TCDouble);
+  PrimitiveCompareOp op = is_min ? PrimitiveCompareOp::kLessThanUnsigned
+                                 : PrimitiveCompareOp::kGreaterThanUnsigned;
+  Register* choose_rhs =
+      env.emit<PrimitiveCompare>(op, rhs_unboxed, lhs_unboxed);
+
+  return env.emitCond(
+      [&](BasicBlock* rhs_block, BasicBlock* lhs_block) {
+        env.emit<CondBranch>(choose_rhs, rhs_block, lhs_block);
+      },
+      [&] { // rhs wins
+        env.emit<UseType>(rhs, TFloatExact);
+        return rhs;
+      },
+      [&] { // lhs wins
+        env.emit<UseType>(lhs, TFloatExact);
+        return lhs;
+      });
+}
+
+static Register* emitBuiltinMinMaxTwoArgCheckedFastPath(
+    Env& env,
+    const VectorCall* instr,
+    Register* target,
+    Register* lhs,
+    Register* rhs,
+    bool is_min) {
+  BasicBlock* slow_lhs = env.func.cfg.AllocateBlock();
+  auto* lhs_check =
+      env.emitInstr<CondBranchCheckType>(lhs, TFloatExact, nullptr, slow_lhs);
+  BasicBlock* rhs_check_block = env.func.cfg.splitAfter(*lhs_check);
+  lhs_check->set_true_bb(rhs_check_block);
+
+  env.block = rhs_check_block;
+  env.cursor = rhs_check_block->begin();
+  Register* lhs_float = env.emit<RefineType>(TFloatExact, lhs);
+
+  BasicBlock* slow_rhs = env.func.cfg.AllocateBlock();
+  auto* rhs_check =
+      env.emitInstr<CondBranchCheckType>(rhs, TFloatExact, nullptr, slow_rhs);
+  BasicBlock* fast_block = env.func.cfg.splitAfter(*rhs_check);
+  rhs_check->set_true_bb(fast_block);
+
+  env.block = fast_block;
+  env.cursor = fast_block->begin();
+  Register* rhs_float = env.emit<RefineType>(TFloatExact, rhs);
+  Register* fast_value =
+      emitBuiltinMinMaxFloatFastPath(env, target, lhs_float, rhs_float, *instr->frameState(), is_min);
+
+  auto* fast_exit = env.emitInstr<Branch>(nullptr);
+  BasicBlock* join = env.func.cfg.splitAfter(*fast_exit);
+  fast_exit->set_target(join);
+  BasicBlock* fast_pred = env.block;
+
+  env.block = slow_rhs;
+  env.cursor = slow_rhs->end();
+  Register* rhs_slow_value = emitGenericVectorCallClone(env, instr);
+  env.emit<Branch>(join);
+
+  env.block = slow_lhs;
+  env.cursor = slow_lhs->end();
+  Register* lhs_slow_value = emitGenericVectorCallClone(env, instr);
+  env.emit<Branch>(join);
+
+  env.block = join;
+  env.cursor = join->begin();
+  std::unordered_map<BasicBlock*, Register*> phi_inputs{
+      {fast_pred, fast_value},
+      {slow_rhs, rhs_slow_value},
+      {slow_lhs, lhs_slow_value},
+  };
+  return env.emit<Phi>(phi_inputs);
+}
+
 static Register* simplifyVectorCallBuiltinMinMax(
     Env& env,
     const VectorCall* instr) {
@@ -2592,41 +2701,39 @@ static Register* simplifyVectorCallBuiltinMinMax(
 
   Register* lhs = instr->arg(0);
   Register* rhs = instr->arg(1);
+  Type lhs_ty = lhs->type();
+  Type rhs_ty = rhs->type();
+
+  // Only consider specialization when both args could actually be boxed exact
+  // floats. This avoids forcing integer-heavy index code and primitive numeric
+  // values through an object-only float path.
+  if (!lhs_ty.couldBe(TObject) || !rhs_ty.couldBe(TObject) ||
+      !lhs_ty.couldBe(TFloatExact) || !rhs_ty.couldBe(TFloatExact)) {
+    return nullptr;
+  }
+
   // Leave obviously integral clamp-style shapes on the generic path instead
   // of forcing them through the float fast path and deopting immediately.
   if ((lhs->isA(TLongExact) || rhs->isA(TLongExact)) &&
       !lhs->isA(TFloatExact) && !rhs->isA(TFloatExact)) {
     return nullptr;
   }
-  if (!lhs->isA(TFloatExact)) {
-    lhs = env.emit<GuardType>(TFloatExact, lhs, *instr->frameState());
+
+  auto emit_fast = [&](Register* fast_lhs, Register* fast_rhs) {
+    return emitBuiltinMinMaxFloatFastPath(
+        env, target, fast_lhs, fast_rhs, *instr->frameState(), is_min);
+  };
+
+  if (lhs->isA(TFloatExact) && rhs->isA(TFloatExact)) {
+    return emit_fast(lhs, rhs);
   }
-  if (!rhs->isA(TFloatExact)) {
-    rhs = env.emit<GuardType>(TFloatExact, rhs, *instr->frameState());
+
+  if (!lhs->isA(TFloatExact) && !rhs->isA(TFloatExact)) {
+    return emitBuiltinMinMaxTwoArgCheckedFastPath(
+        env, instr, target, lhs, rhs, is_min);
   }
 
-  env.emit<UseType>(target, target->type());
-  env.emit<UseType>(lhs, TFloatExact);
-  env.emit<UseType>(rhs, TFloatExact);
-
-  Register* lhs_unboxed = env.emit<PrimitiveUnbox>(lhs, TCDouble);
-  Register* rhs_unboxed = env.emit<PrimitiveUnbox>(rhs, TCDouble);
-  PrimitiveCompareOp op = is_min ? PrimitiveCompareOp::kLessThanUnsigned
-                                 : PrimitiveCompareOp::kGreaterThanUnsigned;
-  Register* choose_rhs = env.emit<PrimitiveCompare>(op, rhs_unboxed, lhs_unboxed);
-
-  return env.emitCond(
-      [&](BasicBlock* rhs_block, BasicBlock* lhs_block) {
-        env.emit<CondBranch>(choose_rhs, rhs_block, lhs_block);
-      },
-      [&] { // rhs wins
-        env.emit<UseType>(rhs, TFloatExact);
-        return rhs;
-      },
-      [&] { // lhs wins
-        env.emit<UseType>(lhs, TFloatExact);
-        return lhs;
-      });
+  return nullptr;
 }
 
 static Register* simplifyLoadModuleAttrCachedMathSqrt(
@@ -2920,6 +3027,9 @@ std::optional<std::pair<Instr*, std::vector<Instr*>>> isVectorCallIfIsInstance(
 Register* simplifyVectorCall(Env& env, const VectorCall* instr) {
   if (Register* result = simplifyVectorCallStatic(env, instr)) {
     return result;
+  }
+  if (instr->flags() & CallFlags::NoSpecialize) {
+    return nullptr;
   }
   if (instr->flags() & CallFlags::KwArgs) {
     return nullptr;
