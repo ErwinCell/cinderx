@@ -2471,62 +2471,6 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "([10, 20], 30, [40, 50])", proc.stdout)
 
-    def test_range_slice_and_item_specialization(self) -> None:
-        code = textwrap.dedent(
-            """
-            import cinderx.jit as jit
-            import cinderjit
-
-            jit.enable()
-            jit.enable_specialized_opcodes()
-            jit.compile_after_n_calls(1000000)
-
-            def test_range_ops(seq):
-                mid = len(seq) // 2
-                left = seq[:mid]
-                item = seq[mid]
-                right = seq[mid + 1:]
-                return left, item, right
-
-            data = range(50)
-            for _ in range(100000):
-                test_range_ops(data)
-
-            assert jit.force_compile(test_range_ops)
-            counts = cinderjit.get_function_hir_opcode_counts(test_range_ops)
-            print(counts.get("RangeSlice", 0))
-            print(counts.get("RangeItem", 0))
-            print(counts.get("BuildSlice", 0))
-            print(counts.get("BinaryOp", 0))
-            print(test_range_ops(range(5)))
-            """
-        )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            script = f"{tmp}/range_slice_specialization.py"
-            with open(script, "w", encoding="utf-8") as fp:
-                fp.write(code)
-
-            proc = subprocess.run(
-                [sys.executable, script],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=dict(os.environ),
-            )
-            self.assertEqual(
-                proc.returncode,
-                0,
-                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
-            )
-            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            self.assertGreaterEqual(len(lines), 5, proc.stdout)
-            self.assertEqual(int(lines[-5]), 2, proc.stdout)
-            self.assertEqual(int(lines[-4]), 1, proc.stdout)
-            self.assertEqual(int(lines[-3]), 0, proc.stdout)
-            self.assertEqual(int(lines[-2]), 0, proc.stdout)
-            self.assertEqual(lines[-1], "(range(0, 2), 2, range(3, 5))", proc.stdout)
-
     def test_istruthy_bool_uses_pointer_compare_fast_path(self) -> None:
         # Regression guard:
         # bool-heavy truthiness checks should not rely solely on

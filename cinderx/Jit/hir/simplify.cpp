@@ -20,7 +20,6 @@
 #include "cinderx/Jit/hir/type.h"
 #include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/StaticPython/strictmoduleobject.h"
-#include "rangeobject.h"
 
 #include <fmt/ostream.h>
 
@@ -928,31 +927,6 @@ Register* simplifyBinaryOp(Env& env, const BinaryOp* instr) {
   Register* rhs = instr->right();
 
   if (op == BinaryOpKind::kSubscript) {
-    Type range_exact = Type::fromTypeExact(&PyRange_Type);
-    if (lhs->type().couldBe(range_exact) && rhs->instr()->IsBuildSlice()) {
-      auto* build_slice = static_cast<const BuildSlice*>(rhs->instr());
-      Register* start = build_slice->start();
-      Register* stop = build_slice->stop();
-      bool supported_start = start->isA(TNoneType) || start->isA(TLongExact);
-      bool supported_stop = stop->isA(TNoneType) || stop->isA(TLongExact);
-      if (build_slice->NumOperands() == 2 && supported_start && supported_stop) {
-        if (!lhs->isA(range_exact)) {
-          lhs = env.emit<GuardType>(range_exact, lhs, *instr->frameState());
-        } else {
-          env.emit<UseType>(lhs, range_exact);
-        }
-        return env.emit<RangeSlice>(lhs, start, stop, *instr->frameState());
-      }
-    }
-    if (lhs->type().couldBe(range_exact) && rhs->isA(TLongExact)) {
-      if (!lhs->isA(range_exact)) {
-        lhs = env.emit<GuardType>(range_exact, lhs, *instr->frameState());
-      } else {
-        env.emit<UseType>(lhs, range_exact);
-      }
-      return env.emit<RangeItem>(lhs, rhs, *instr->frameState());
-    }
-
     if (lhs->isA(TDictExact)) {
       return env.emit<DictSubscr>(lhs, rhs, *instr->frameState());
     }

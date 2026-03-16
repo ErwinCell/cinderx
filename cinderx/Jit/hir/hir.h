@@ -739,20 +739,6 @@ DEFINE_SIMPLE_INSTR(
     Operands<3>,
     DeoptBase);
 
-DEFINE_SIMPLE_INSTR(
-    RangeSlice,
-    (TObject, TObject, TObject),
-    HasOutput,
-    Operands<3>,
-    DeoptBase);
-
-DEFINE_SIMPLE_INSTR(
-    RangeItem,
-    (TObject, TObject),
-    HasOutput,
-    Operands<2>,
-    DeoptBase);
-
 // Gets a tuple representation from a sequence.
 DEFINE_SIMPLE_INSTR(GetTuple, (TObject), HasOutput, Operands<1>, DeoptBase);
 

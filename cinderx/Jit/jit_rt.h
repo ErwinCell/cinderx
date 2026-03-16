@@ -183,18 +183,6 @@ PyObject* JITRT_LoadGlobalsDict(PyThreadState* tstate);
 PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop);
 
 /*
- * Slice an exact range without allocating an intermediate slice object.
- *
- * `start` and `stop` must be either `Py_None` or an exact `int`.
- */
-PyObject* JITRT_RangeSlice(PyObject* range, PyObject* start, PyObject* stop);
-
-/*
- * Load an item from an exact range for an exact-int index.
- */
-PyObject* JITRT_RangeItem(PyObject* range, PyObject* index);
-
-/*
  * Helper to perform a Python call with dynamically determined arguments.
  *
  * pargs will be a possibly empty tuple of positional arguments, kwargs will be

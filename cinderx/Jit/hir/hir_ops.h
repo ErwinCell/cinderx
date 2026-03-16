@@ -88,8 +88,6 @@ namespace jit::hir {
   V(IntConvert)                        \
   V(PrimitiveUnaryOp)                  \
   V(PrimitiveUnbox)                    \
-  V(RangeItem)                         \
-  V(RangeSlice)                        \
   V(InvokeIterNext)                    \
   V(IsInstance)                        \
   V(InvokeStaticFunction)              \

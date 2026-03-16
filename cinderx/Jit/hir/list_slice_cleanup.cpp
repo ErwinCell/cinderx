@@ -6,7 +6,7 @@ namespace jit::hir {
 
 namespace {
 
-bool hasMatchingSpecializedSlice(const BuildSlice& build_slice) {
+bool hasMatchingListSlice(const BuildSlice& build_slice) {
   BasicBlock* block = build_slice.block();
   if (block == nullptr || build_slice.NumOperands() != 2) {
     return false;
@@ -16,7 +16,7 @@ bool hasMatchingSpecializedSlice(const BuildSlice& build_slice) {
        it != block->end();
        ++it) {
     Instr& instr = *it;
-    if (!instr.IsListSlice() && !instr.IsRangeSlice()) {
+    if (!instr.IsListSlice()) {
       continue;
     }
     if (instr.bytecodeOffset() != build_slice.bytecodeOffset()) {
@@ -49,7 +49,7 @@ void ListSliceCleanup::Run(Function& irfunc) {
       if (use_it == direct_uses.end()) {
         continue;
       }
-      if (!hasMatchingSpecializedSlice(build_slice)) {
+      if (!hasMatchingListSlice(build_slice)) {
         continue;
       }
 
