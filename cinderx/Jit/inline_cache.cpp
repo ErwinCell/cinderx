@@ -1083,6 +1083,10 @@ std::string_view cacheMissReason(CacheMissReason reason) {
   return kCacheMissReasons[static_cast<size_t>(reason)];
 }
 
+#if PY_VERSION_HEX >= 0x030C0000
+bool isValidKeysVersion(uint32_t keys_version, BorrowedRef<> obj);
+#endif
+
 LoadMethodCache::~LoadMethodCache() {
   for (auto& entry : entries_) {
     if (entry.type != nullptr) {
@@ -1104,6 +1108,16 @@ LoadMethodResult LoadMethodCache::getValueHelper(
     LoadMethodCache* cache,
     PyObject* obj) {
   auto& entry = cache->entries_[0];
+  if (entry.type != Py_TYPE(obj)) {
+    JIT_DCHECK(cache->cached_name_ != nullptr, "expected cached method name");
+    return cache->lookup(obj, cache->cached_name_);
+  }
+#if PY_VERSION_HEX >= 0x030C0000
+  if (!isValidKeysVersion(entry.keys_version, obj)) {
+    JIT_DCHECK(cache->cached_name_ != nullptr, "expected cached method name");
+    return cache->lookup(obj, cache->cached_name_);
+  }
+#endif
   PyObject* result = entry.value;
   JIT_DCHECK(result != nullptr, "expected cached method value");
   Py_INCREF(result);
@@ -1145,19 +1159,39 @@ LoadMethodResult LoadMethodCache::lookup(
     BorrowedRef<> name) {
   BorrowedRef<PyTypeObject> tp = Py_TYPE(obj);
 
-  for (auto& entry : entries_) {
-    if (entry.type == tp) {
+  auto return_cached = [&](const Entry& entry) -> LoadMethodResult {
+    PyObject* result = entry.value;
+    Py_INCREF(result);
+    Py_INCREF(obj);
+    return {result, obj};
+  };
+
+  auto& first_entry = entries_[0];
+  if (first_entry.type == tp) {
 #if PY_VERSION_HEX >= 0x030C0000
-      if (!isValidKeysVersion(entry.keys_version, obj)) {
-        continue;
-      }
+    if (isValidKeysVersion(first_entry.keys_version, obj)) {
+      return return_cached(first_entry);
+    }
+#else
+    return return_cached(first_entry);
+#endif
+  }
+
+  for (auto it = std::next(entries_.begin()); it != entries_.end(); ++it) {
+    auto& entry = *it;
+    if (entry.type != tp) {
+      continue;
+    }
+#if PY_VERSION_HEX >= 0x030C0000
+    if (!isValidKeysVersion(entry.keys_version, obj)) {
+      continue;
+    }
 #endif
 
-      PyObject* result = entry.value;
-      Py_INCREF(result);
-      Py_INCREF(obj);
-      return {result, obj};
-    }
+    // Promote the hottest exact receiver to slot 0 so monomorphic wrappers
+    // stay on the shortest helper path.
+    std::swap(first_entry, entry);
+    return return_cached(first_entry);
   }
 
   return lookupSlowPath(obj, name);
@@ -1283,6 +1317,7 @@ void LoadMethodCache::fill(
     return;
   }
 
+  cached_name_ = name;
   for (auto& entry : entries_) {
     if (entry.type == nullptr) {
       uint32_t keys_version = 0;

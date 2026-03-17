@@ -472,9 +472,13 @@ bool canUseMethodWithValuesFastPath(
     PyObject* descr,
     BorrowedRef<PyCodeObject> code,
     BorrowedRef<PyDictObject> globals) {
-  return hasStableExactReceiverType(receiver) ||
-      (receiverIsNamedSelfArg(receiver, code) &&
-       methodDescrOwnerHasNoSubclasses(descr, globals));
+  if (hasStableExactReceiverType(receiver)) {
+    return true;
+  }
+  if (receiverIsNamedSelfArg(receiver, code)) {
+    return false;
+  }
+  return methodDescrOwnerHasNoSubclasses(descr, globals);
 }
 
 bool isBuiltinSetType(Register* reg) {
@@ -3450,6 +3454,23 @@ void HIRBuilder::emitLoadAttr(
   int oparg = bc_instr.oparg();
   int name_idx = loadAttrIndex(oparg);
   Register* receiver = tc.frame.stack.pop();
+  auto is_nonexact_self_receiver = [&]() {
+    if (
+        tc.frame.localsplus.empty() || receiver != tc.frame.localsplus[0] ||
+        receiver->type().isExact()) {
+      return false;
+    }
+    BorrowedRef<> arg0_name_obj{jit::getVarname(code_, 0)};
+    if (!PyUnicode_CheckExact(arg0_name_obj)) {
+      return false;
+    }
+    const char* arg0_name = PyUnicode_AsUTF8(arg0_name_obj);
+    if (arg0_name == nullptr) {
+      PyErr_Clear();
+      return false;
+    }
+    return std::strcmp(arg0_name, "self") == 0;
+  };
   bool is_method =
 #if PY_VERSION_HEX >= 0x030C0000
       (oparg & 1) != 0;

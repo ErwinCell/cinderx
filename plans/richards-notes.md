@@ -199,6 +199,186 @@
   - the formal pyperformance worker-hook path is now fixed
   - but a config-matched x86 rebuild remains the last major comparison-quality blocker
 
+## 2026-03-15 Round 2 Candidate
+
+### Tiny wrapper method path still looks like the cleanest next hotspot
+
+- Current direct-benchmark compiled sizes still show the biggest ARM-vs-x86 gap in the tiny method wrappers:
+  - `HandlerTaskRec.workInAdd`
+    - ARM: `1000`
+    - x86: `704`
+    - delta: `+42.05%`
+  - `HandlerTaskRec.deviceInAdd`
+    - ARM: `1000`
+    - x86: `704`
+    - delta: `+42.05%`
+  - `Packet.append_to`
+    - ARM: `1056`
+    - x86: `808`
+    - delta: `+30.69%`
+  - wrapper driver `run`
+    - ARM: `2664`
+    - x86: `2344`
+    - delta: `+13.65%`
+
+### Why this points at method lookup / call tightening
+
+- The wrappers are extremely small and mostly do:
+  - load a receiver field
+  - invoke `append_to`
+  - store the result back
+  - return the updated field
+- That shape is a better fit for a method lookup/call fast path than for another broad HIR attr rewrite.
+- The branch already contains dormant exact-instance method-cache scaffolding:
+  - `FillMethodCache`
+  - `LoadMethodCacheEntryType`
+  - `LoadMethodCacheEntryValue`
+  - `LoadMethodCache::getValueHelper()`
+- The earlier producer was removed because it skipped shadowing checks, not because the hotspot stopped mattering.
+
+### Current round 2 hypothesis
+
+- Revisit the exact-instance method path only if the new design preserves instance-dict shadowing validity.
+- The best candidate is a correctness-safe fast path for tiny wrapper methods on exact heap receivers, then validate:
+  - first on the method-chain microcase
+  - then on direct `richards`
+
+### Explicitly not the next candidate
+
+- Do not lead with another `STORE_ATTR_INSTANCE_VALUE` rewrite.
+- Do not lead with the env-gated store-attr stub as a default-on change.
+- Do not retry the earlier unsafe exact-cache split without new validity guards.
+
+## 2026-03-15 Round 2 Result
+
+### Candidate tested
+
+- Changed `LoadMethodCache::lookup()` so the common monomorphic path checks slot 0 first and promotes later exact-type hits into slot 0.
+- Intention:
+  - keep tiny wrapper calls on the shortest helper path
+  - do it without reviving the old unsafe exact-cache split producer
+
+### Extra compile-drift fixes needed on latest base
+
+- Before benchmarking the aligned branch, two unrelated base-alignment issues had to be fixed:
+  - `gen_asm.cpp` / `gen_asm.h` API drift against current `ModuleState`
+  - `builder.h` declaration drift for `emitStoreAttr`
+
+### Correctly aligned benchmark result
+
+- Baseline:
+  - `/root/work/cinderx-richards-basealign-r2`
+  - venv: `/root/venv-cinderx314-basealign-r2`
+- Candidate:
+  - `/root/work/cinderx-richards-lmcache-r2`
+  - venv: `/root/venv-cinderx314-lmcache-r2`
+- Artifacts:
+  - local: `artifacts/richards_round2_lmcache_results_20260315_235800/`
+  - remote:
+    - `/root/work/arm-sync/richards_lmcache_r2_basealign.json`
+    - `/root/work/arm-sync/richards_lmcache_r2_candidate.json`
+- Direct benchmark:
+  - `richards`: `0.2747411550s -> 0.2682828620s` (`-2.35%`)
+  - `method_chain`: `0.0016784300s -> 0.0016314271s` (`-2.80%`)
+
+### Interpretation
+
+- This is a real ARM win on the correctly aligned base.
+- The gain is modest but clear.
+- The tiny-wrapper method path still looks like the right family of hotspots.
+- Next follow-up in this family should be a correctness-safe exact-instance cache/call fast path with explicit shadowing validity, not a blind retry of the old split.
+
+## 2026-03-16 Round 2 Follow-up Result
+
+### Safe exact-instance cache split was tested and rejected
+
+- Candidate:
+  - env-gated `PYTHONJITEXACTMETHODCACHESPLIT=1`
+  - producer restored in `simplifyLoadMethod()` only for exact managed-dict receivers
+  - safety added by making `LoadMethodCache::getValueHelper()` fall back to a full lookup when slot-0 type or keys-version checks fail
+- Correctness:
+  - new regression `test_exact_method_cache_split_respects_instance_shadowing` passed on ARM
+- Benchmark:
+  - same build, env off vs env on
+  - artifacts were written remotely under:
+    - `/root/work/arm-sync/richards_exactcache_off.json`
+    - `/root/work/arm-sync/richards_exactcache_on.json`
+  - result:
+    - `method_chain`: `0.0016532539s -> 0.0016452830s` (`-0.48%`)
+    - `richards`: `0.2687889599s -> 0.2726917050s` (`+1.45%`)
+
+### Interpretation
+
+- The safety fix worked.
+- The performance signal is not good enough:
+  - tiny wrapper microcase barely improved
+  - whole `richards` regressed
+- Conclusion:
+  - do not land the exact-instance cache split variant
+  - keep the simpler `LoadMethodCache::lookup()` hot-path reorder as the positive round 2 result
+  - the next likely win should come from further tightening the call sequence itself rather than from adding more cache-shape branching
+
+## 2026-03-17 Issue #44 Fix Result
+
+### Candidate
+
+- In `HIRBuilder::emitLoadAttr()`, `LOAD_ATTR_METHOD_WITH_VALUES` now only lowers through the monomorphic method-with-values path when the receiver type is exact.
+- If the receiver is not exact, lowering falls back to the generic method path instead of baking a single receiver type/version chain into HIR.
+
+### Why this matches the issue
+
+- `Task.runTask` performs `self.fn(...)` on a polymorphic receiver family.
+- The issue's failure mode is exactly "monomorphic method-with-values lowering applied to a polymorphic virtual call".
+- This fix blocks that lowering at the builder gate rather than trying to repair it later with additional cache machinery.
+
+### Targeted regression
+
+- New regression in `test_arm_runtime.py`:
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`
+- Result on ARM:
+  - passed
+  - synthetic mixed-subclass `Task.runTask` path reported zero `LOAD_ATTR_METHOD_WITH_VALUES` deopt entries
+
+### Direct benchmark result against current aligned baseline
+
+- Baseline:
+  - `/root/work/cinderx-richards-lmcache-r2`
+  - venv: `/root/venv-cinderx314-lmcache-r2`
+- Candidate:
+  - `/root/work/cinderx-richards-poly-r2`
+  - venv: `/root/venv-cinderx314-poly-r2`
+- Artifacts:
+  - local: `artifacts/richards_issue44_round2_results_20260317_223500/`
+  - remote:
+    - `/root/work/arm-sync/richards_polyfix_base.json`
+    - `/root/work/arm-sync/richards_polyfix_new.json`
+- Result:
+  - `richards`: `0.2724542680s -> 0.1779967260s` (`-34.67%`)
+  - `method_chain`: `0.0016417440s -> 0.0016625750s` (`+1.27%`)
+
+### Requested regression sweep
+
+- Sweep mode:
+  - pyperformance `--debug-single-value`
+  - specialized opcodes enabled in worker startup
+- Compared set:
+  - `generators, coroutines, comprehensions, richards, richards_super, float, go, deltablue, raytrace, nqueens, nbody, unpack_sequence, fannkuch, coverage, scimark, spectral_norm, chaos, logging`
+- Largest regressions seen:
+  - `comprehensions` `+7.34%`
+  - `spectral_norm` `+4.25%`
+  - `logging_format` `+3.26%`
+  - `scimark_sor` `+2.82%`
+  - `richards_super` `+2.54%`
+- Largest wins seen:
+  - `scimark_monte_carlo` `-9.02%`
+  - `coroutines` `-7.03%`
+  - `logging_simple` `-5.29%`
+  - `raytrace` `-4.88%`
+  - `go` `-3.98%`
+- Interpretation:
+  - the fix is strongly positive for the target `richards` issue
+  - there are a few modest regressions elsewhere that should be investigated before calling the change universally safe
+
 ## Current Worktree Stage Map
 
 ### HIR-heavy files
@@ -284,3 +464,31 @@
 - Run structured code review before remote validation.
 - Initialize and inspect the shared scheduler DB.
 - Draft the first case issue reply with imported evidence and the next remote question.
+
+## 2026-03-17 Poly2 Localization Update
+
+- The broad non-exact-receiver gate was too wide.
+- A narrower gate that only disables `LOAD_ATTR_METHOD_WITH_VALUES` for non-exact local `self` receivers was tested.
+- Direct benchmark vs `lmcache-r2`:
+  - `richards`: `0.2744622920s -> 0.1935804160s` (`-29.47%`)
+  - `method_chain`: `0.0016087320s -> 0.0016213530s` (`+0.78%`)
+- Focused regression subset:
+  - `comprehensions`: `-4.03%`
+  - `richards`: `-1.15%`
+  - `richards_super`: `-0.01%`
+  - `logging_format`: `+2.76%`
+  - `logging_silent`: `-1.41%`
+  - `logging_simple`: `-0.73%`
+- Localization conclusion:
+  - `comprehensions` and `richards_super` were collateral damage from the broad gate and recover under the self-only gate
+  - `logging_format` was the main residual suspect, but repeated sampling suggests it is noise
+
+## 2026-03-17 Logging Repeat Check
+
+- Repeated `pyperformance logging` (5 base/new pairs, median compared):
+  - `logging_format`: `-0.76%`
+  - `logging_silent`: `+0.78%`
+  - `logging_simple`: `+2.35%`
+- Interpretation:
+  - the earlier `logging_format +2.76%` single-value signal was likely noise
+  - if we continue logging-focused localization, `logging_simple` is now the better residual target

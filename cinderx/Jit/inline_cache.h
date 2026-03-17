@@ -309,6 +309,7 @@ class LoadMethodCache {
   fill(BorrowedRef<PyTypeObject> type, BorrowedRef<> value, BorrowedRef<> name);
 
   std::array<Entry, 4> entries_;
+  BorrowedRef<> cached_name_;
   std::unique_ptr<CacheStats> cache_stats_;
 };
 

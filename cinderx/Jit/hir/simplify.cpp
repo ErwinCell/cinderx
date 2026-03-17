@@ -27,6 +27,21 @@
 
 namespace jit::hir {
 
+namespace {
+
+bool useExactMethodCacheSplit() {
+  static int enabled = []() -> int {
+    const char* env = std::getenv("PYTHONJITEXACTMETHODCACHESPLIT");
+    if (env == nullptr) {
+      return 0;
+    }
+    return *env != '\0' && std::strcmp(env, "0") != 0;
+  }();
+  return enabled != 0;
+}
+
+} // namespace
+
 // This file contains the Simplify pass, which is a collection of
 // strength-reduction optimizations. An optimization should be added as a case
 // in Simplify rather than a standalone pass if and only if it meets these
@@ -913,6 +928,30 @@ Register* simplifyLoadMethod(Env& env, const LoadMethod* load_meth) {
   BorrowedRef<PyTypeObject> type{ty.runtimePyType()};
   if (type == &PyModule_Type || type == &Ci_StrictModule_Type) {
     return simplifyLoadModuleMethodCached(env, load_meth);
+  }
+  if (
+      useExactMethodCacheSplit() && type != nullptr &&
+      type != &PyModule_Type && type != &Ci_StrictModule_Type &&
+      PyType_HasFeature(type, Py_TPFLAGS_MANAGED_DICT)) {
+    const int cache_id = env.func.env.allocateLoadMethodCache();
+    env.emit<UseType>(receiver, receiver->type());
+    Register* obj_type = env.emit<LoadField>(
+        receiver, "ob_type", offsetof(PyObject, ob_type), TType);
+    Register* guard = env.emit<LoadMethodCacheEntryType>(cache_id);
+    Register* type_matches =
+        env.emit<PrimitiveCompare>(PrimitiveCompareOp::kEqual, guard, obj_type);
+    return env.emitCond(
+        [&](BasicBlock* fast_path, BasicBlock* slow_path) {
+          env.emit<CondBranch>(type_matches, fast_path, slow_path);
+        },
+        [&] { return env.emit<LoadMethodCacheEntryValue>(cache_id, receiver); },
+        [&] {
+          return env.emit<FillMethodCache>(
+              receiver,
+              load_meth->name_idx(),
+              cache_id,
+              *load_meth->frameState());
+        });
   }
   return env.emit<LoadMethodCached>(
       load_meth->GetOperand(0),

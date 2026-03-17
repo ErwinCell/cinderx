@@ -295,6 +295,131 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 2000, proc.stdout)
 
+    def test_exact_method_cache_split_respects_instance_shadowing(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.compile_after_n_calls(1000000)
+
+            class Box:
+                def foo(self, x):
+                    return x + 1
+
+            def f(box):
+                return box.foo(4)
+
+            box = Box()
+            for _ in range(200000):
+                f(box)
+
+            assert jit.force_compile(f)
+            print(f(box))
+            box.foo = lambda x: x + 10
+            print(f(box))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/exact_method_cache_shadowing.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITEXACTMETHODCACHESPLIT"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(int(lines[-2]), 5, proc.stdout)
+            self.assertEqual(int(lines[-1]), 14, proc.stdout)
+
+    def test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts(
+        self,
+    ) -> None:
+        code = textwrap.dedent(
+            """
+            import json
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Task:
+                def runTask(self, x):
+                    return self.fn(x)
+
+            class WorkTask(Task):
+                def fn(self, x):
+                    return x + 1
+
+            class DeviceTask(Task):
+                def fn(self, x):
+                    return x + 2
+
+            class HandlerTask(Task):
+                def fn(self, x):
+                    return x + 3
+
+            work = WorkTask()
+            for _ in range(200000):
+                work.runTask(1)
+
+            assert jit.force_compile(Task.runTask)
+            jit.get_and_clear_runtime_stats()
+
+            total = 0
+            seq = [work, DeviceTask(), HandlerTask(), work]
+            for i in range(10000):
+                total += seq[i % len(seq)].runTask(i)
+
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats.get("deopt", [])
+                if entry["normal"]["func_qualname"] == "Task.runTask"
+                and entry["normal"]["description"] == "LOAD_ATTR_METHOD_WITH_VALUES"
+            ]
+            print(len(relevant))
+            print(sum(entry["int"]["count"] for entry in relevant))
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/polymorphic_virtual_method_deopts.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+
     def test_inferred_self_type_guard_deopts_on_subclass_instance(self) -> None:
         # Regression guard:
         # inferred exact-self typing should install an entry GuardType for

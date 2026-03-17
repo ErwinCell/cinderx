@@ -79,3 +79,43 @@
 - Detection gap: Earlier worker-hook debugging focused on `sitecustomize` path checks and not on the parent-process environment contract.
 - Prevention rule: Keep the pyperformance parent process on `PYTHONJITDISABLE=1` and pass worker-only autojit state through a dedicated inherited variable.
 - Validation added: `CINDERX_WORKER_PYTHONJITAUTO` is now consumed by `sitecustomize.py`, and both ARM and x86 worker rechecks passed.
+
+## 2026-03-15 - Do not benchmark a candidate against a non-aligned baseline
+
+- Symptom: The first round 2 comparison mixed the new aligned branch with the older round 1 current workdir and produced an unusable result.
+- Root cause: The benchmark compared a candidate that already included latest-base alignment fixes against a baseline built from an older branch state.
+- Detection gap: The branch-alignment work happened before the round 2 helper experiment, but the benchmark setup still pointed at the old baseline.
+- Prevention rule: Once the branch base changes, rebuild a fresh aligned baseline before attributing wins or losses to the new optimization.
+- Validation added: round 2 was re-run against `/root/work/cinderx-richards-basealign-r2`, producing the valid `-2.35%` richards win.
+
+## 2026-03-16 - A shadowing-safe cache split can still lose end-to-end
+
+- Symptom: The env-gated exact-instance method-cache split passed the new shadowing regression but still regressed whole `richards`.
+- Root cause: Preserving correctness by adding fallback behavior kept the fast path from being cheap enough to pay for its extra branching and cache-shape machinery.
+- Detection gap: The previous unsafe version failed on correctness before we could measure the fully safe variant.
+- Prevention rule: When a previously unsafe optimization is revived with the missing correctness checks restored, treat it as a new performance experiment rather than assuming the earlier win hypothesis still holds.
+- Validation added: the exact-instance cache split now has both a shadowing regression and a direct richards benchmark result, and the result is explicitly negative.
+
+## 2026-03-17 - Fix the cause, not the shape, for polymorphic virtual calls
+
+- Symptom: The biggest richards win in this round did not come from adding more cache structure; it came from refusing to apply monomorphic `LOAD_ATTR_METHOD_WITH_VALUES` lowering to non-exact receivers.
+- Root cause: `Task.runTask` was hurt because a single-type method-with-values specialization was fundamentally the wrong lowering for a polymorphic virtual call.
+- Detection gap: Earlier rounds focused on repairing or accelerating the specialized path instead of first asking whether the path should exist for that receiver shape.
+- Prevention rule: When a deopt issue is caused by a specialization precondition mismatch, first try gating the specialization on a statically checkable precondition before adding more fallback machinery.
+- Validation added: the exact-only builder gate produced a `-34.67%` richards win and a zero-deopt synthetic regression for the targeted polymorphic case.
+
+## 2026-03-17 - After narrowing the gate, reclassify the remaining regressions
+
+- Symptom: Once the issue-#44 gate was narrowed to non-exact `self`, the obvious target-family regressions disappeared but `logging_format` remained mildly slower.
+- Root cause: Not every regression under the broad gate belonged to the same specialization bug family.
+- Detection gap: The first sweep mixed true collateral regressions with unrelated or noisy ones.
+- Prevention rule: After narrowing a fix, rerun a focused subset and treat the remaining regressions as a new, smaller localization problem.
+- Validation added: the self-only gate recovered `comprehensions` and `richards_super`, leaving `logging_format` as the main residual target.
+
+## 2026-03-17 - Do not overreact to single-value residual regressions
+
+- Symptom: `logging_format` looked like a persistent regression in the first focused subset.
+- Root cause: `--debug-single-value` on a tiny logging benchmark was too noisy to treat one pass as conclusive.
+- Detection gap: The first subset pass optimized for speed of localization rather than statistical confidence.
+- Prevention rule: For tiny residual regressions, rerun repeated samples before changing code to fix them.
+- Validation added: 5 repeated `logging` pyperformance runs showed `logging_format` at `-0.76%`, so it is no longer the top residual concern.

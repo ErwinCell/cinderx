@@ -126,6 +126,92 @@
 - [ ] Reserve the minimum ARM lease needed for the next concrete question.
 - [ ] After each remote action, update `plans/richards-issue.md` and `plans/richards-mistake-ledger.md`.
 
+## Round 2 Candidate
+
+- Primary candidate:
+  - tighten the tiny wrapper method path around `HandlerTaskRec.workInAdd` / `deviceInAdd`
+- Why this is next:
+  - current direct benchmark still shows the largest per-function ARM-vs-x86 code-size gap in the method-chain wrappers:
+    - `HandlerTaskRec.workInAdd`: `1000` vs `704` (`+42.05%`)
+    - `HandlerTaskRec.deviceInAdd`: `1000` vs `704` (`+42.05%`)
+    - `Packet.append_to`: `1056` vs `808` (`+30.69%`)
+- Working hypothesis:
+  - richards still pays too much on ARM for exact-instance method lookup/call plumbing in these tiny wrappers.
+  - the most promising next step is a correctness-safe instance method-cache fast path that preserves shadowing checks, not a blind retry of the earlier unsafe exact-cache split.
+- Guardrails for round 2:
+  - do not reuse the old exact method-cache split as-is
+  - any new fast path must preserve instance-dict shadowing validity
+  - benchmark tiny-wrapper microcase and whole `richards` together before declaring progress
+
+## Round 2 Status
+
+- Candidate:
+  - `LoadMethodCache::lookup()` hot-path reorder:
+    - explicit slot-0 fast path
+    - promote later exact-type hits into slot 0
+- Alignment fixes required before testing on latest base:
+  - `gen_asm.cpp` / `gen_asm.h` drift against current `ModuleState` API
+  - `builder.h` signature drift for `emitStoreAttr`
+- ARM aligned-base rebuild:
+  - compile lease `6`
+  - workdir: `/root/work/cinderx-richards-basealign-r2`
+  - build and focused richards wrapper smoke passed
+- ARM candidate rebuild:
+  - compile lease `3`
+  - workdir: `/root/work/cinderx-richards-lmcache-r2`
+  - broad runtime suite still contains unrelated base-branch failures, so round 2 correctness was checked with targeted wrapper validation instead
+- ARM targeted verify:
+  - verify lease `4`
+  - `test_jit_force_compile_smoke` passed
+  - wrapper-specific richards force-compile smoke passed
+- ARM round 2 benchmark:
+  - benchmark lease `7`
+  - aligned base vs candidate:
+    - `richards`: `0.2747411550s -> 0.2682828620s` (`-2.35%`)
+    - `method_chain`: `0.0016784300s -> 0.0016314271s` (`-2.80%`)
+- ARM round 2 follow-up candidate:
+  - exact-instance method-cache split, now made shadowing-safe through `LoadMethodCache::getValueHelper()` fallback
+  - compile lease `9`
+  - verify lease `10`
+  - benchmark lease `11`
+  - result:
+    - `method_chain`: `0.0016532539s -> 0.0016452830s` (`-0.48%`)
+    - `richards`: `0.2687889599s -> 0.2726917050s` (`+1.45%`)
+  - decision:
+    - correctness is acceptable
+    - performance is not good enough for landing
+- ARM issue #44 candidate:
+  - gate `LOAD_ATTR_METHOD_WITH_VALUES` lowering on exact receiver type only
+  - compile lease `12`
+  - verify lease `13`
+  - benchmark lease `14`
+  - result:
+    - `method_chain`: `0.0016417440s -> 0.0016625750s` (`+1.27%`)
+    - `richards`: `0.2724542680s -> 0.1779967260s` (`-34.67%`)
+  - targeted regression:
+    - new synthetic polymorphic virtual-method test passed
+  - quick regression sweep vs `lmcache-r2`:
+    - biggest regressions in the requested list were:
+      - `comprehensions` `+7.34%`
+      - `spectral_norm` `+4.25%`
+      - `logging_format` `+3.26%`
+      - `scimark_sor` `+2.82%`
+      - `richards_super` `+2.54%`
+    - most other listed cases were flat to better, including:
+      - `coroutines` `-7.03%`
+      - `go` `-3.98%`
+      - `coverage` `-3.72%`
+      - `raytrace` `-4.88%`
+      - `richards` `-0.92%` in formal debug-single-value pyperformance mode
+
+## Current Best Next Step
+
+- Keep this round 2 helper reorder as positive evidence.
+- The next candidate should still stay close to the polymorphic virtual-method problem, but the exact-instance cache split variant is now explicitly ruled out.
+- The two most valuable follow-ups now are:
+  - verify whether the `Task.runTask` deopt fix can be narrowed to avoid the small `richards_super` / `comprehensions` / `spectral_norm` regressions
+  - a config-matched x86 rebuild so the formal ARM-vs-x86 comparison can be trusted again
+
 ## Hard Rules
 
 - No remote command without a scheduler lease.
@@ -196,3 +282,26 @@
 - Remaining blocker before formal closure:
   - x86 formal pyperformance still needs a fully config-matched build path before we treat the cross-host number as final closure evidence
   - final pre-merge x86 functionality validation has not been spent yet
+
+## 2026-03-17 Poly2 Update
+
+- Narrowed issue-#44 gate:
+  - disable `LOAD_ATTR_METHOD_WITH_VALUES` only for non-exact local `self`
+- Lease trail:
+  - compile `16`
+  - verify `17`
+  - benchmark `18`
+- Result:
+  - direct `richards`: `0.2744622920s -> 0.1935804160s` (`-29.47%`)
+  - direct `method_chain`: `0.0016087320s -> 0.0016213530s` (`+0.78%`)
+- Focused regression subset:
+  - `comprehensions`: `-4.03%`
+  - `richards`: `-1.15%`
+  - `richards_super`: `-0.01%`
+  - `logging_format`: `+2.76%`
+  - `logging_silent`: `-1.41%`
+  - `logging_simple`: `-0.73%`
+- Current best next step:
+  - keep the self-only gate as the best issue-#44 fix so far
+  - treat `logging_format` as likely noise after repeated sampling
+  - if we keep investigating residuals, `logging_simple` is now the more plausible logging-side follow-up

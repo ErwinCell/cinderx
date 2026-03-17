@@ -455,3 +455,374 @@
   - direct benchmark success masked the fact that formal pyperformance has a stricter parent/worker startup contract.
 - New prevention rule:
   - when validating pyperformance, test the parent-process startup mode and worker startup mode separately before running the benchmark itself.
+
+## Round 2 - next candidate
+
+### Context
+
+- Case: `richards`
+- Stage: `lir`
+- Starting point:
+  - latest aligned base: `origin/bench-cur-7c361dce`
+  - current validated branch carries the round 1 ARM and pyperformance fixes
+
+### Candidate hotspot
+
+- Tiny wrapper methods still carry the biggest per-function ARM-vs-x86 code-size gap:
+  - `HandlerTaskRec.workInAdd`: `1000` vs `704`
+  - `HandlerTaskRec.deviceInAdd`: `1000` vs `704`
+  - `Packet.append_to`: `1056` vs `808`
+
+### Candidate hypothesis
+
+- The next plausible ARM gain is a correctness-safe exact-instance method-cache / call fast path for tiny wrapper methods.
+- This should target wrapper shapes like `workInAdd()` / `deviceInAdd()` where richards still appears to pay too much method lookup/call scaffolding on ARM.
+
+### Hard constraints
+
+- Do not revive the old exact-cache split without shadowing checks.
+- Keep the proof loop:
+  - tiny wrapper microcase first
+  - whole direct `richards` second
+  - remote ARM benchmark only after local proof and review
+
+## Round 2 - lir
+
+### Context
+
+- Case: `richards`
+- Stage: `lir`
+- Lease id / scheduler DB:
+  - aligned-base compile: `6`
+  - candidate compile: `3`
+  - targeted verify: `4`
+  - benchmark: `7`
+  - scheduler: `plans/remote-scheduler.sqlite3`
+- Remote workdir:
+  - aligned base: `/root/work/cinderx-richards-basealign-r2`
+  - candidate: `/root/work/cinderx-richards-lmcache-r2`
+
+### Goal
+
+- Test whether a minimal, correctness-safe `LoadMethodCache` hot-path reorder can reduce ARM overhead in richards tiny wrapper methods on the latest aligned base.
+
+### Change summary
+
+- Updated `LoadMethodCache::lookup()` to:
+  - check slot 0 first on the monomorphic hot path
+  - promote later exact-type hits into slot 0
+- Also fixed two latest-base compile drifts needed to get the aligned branch building on ARM:
+  - `gen_asm.cpp` / `gen_asm.h`
+  - `builder.h`
+
+### Evidence
+
+- Targeted verify:
+  - `test_jit_force_compile_smoke` passed
+  - wrapper-specific `Packet.append_to` / `HandlerTaskRec.workInAdd` / `deviceInAdd` force-compile smoke passed
+- Benchmark artifacts:
+  - local: `artifacts/richards_round2_lmcache_results_20260315_235800/`
+  - remote:
+    - `/root/work/arm-sync/richards_lmcache_r2_basealign.json`
+    - `/root/work/arm-sync/richards_lmcache_r2_candidate.json`
+
+### Benchmark delta
+
+- ARM:
+  - aligned base `richards`: `0.2747411550s`
+  - candidate `richards`: `0.2682828620s`
+  - delta: `-2.35%`
+  - aligned base `method_chain`: `0.0016784300s`
+  - candidate `method_chain`: `0.0016314271s`
+  - delta: `-2.80%`
+- x86 status:
+  - not rerun yet on a config-matched aligned baseline
+
+### Decision
+
+- Status: `complete`
+- Next action:
+  - keep the helper reorder as positive evidence
+  - continue within the tiny-wrapper method path family, but only with designs that preserve explicit shadowing validity
+- Risks or blockers:
+  - the branch still needs a config-matched x86 rebuild before formal cross-host closure
+  - broad ARM runtime failures on the latest base remain outside the scope of this round 2 method-cache change
+
+### Retrospective
+
+- What went wrong or almost went wrong:
+  - the first round 2 comparison used an old non-aligned baseline and produced a misleading result.
+- Why it was missed:
+  - branch-alignment work and round 2 benchmark setup were not re-synced before the first compare.
+- New prevention rule:
+  - once the branch base changes, rebuild the baseline before attributing a new optimization result.
+
+## Round 2 - lir follow-up
+
+### Context
+
+- Case: `richards`
+- Stage: `lir`
+- Lease id / scheduler DB:
+  - compile: `9`
+  - verify: `10`
+  - benchmark: `11`
+  - scheduler: `plans/remote-scheduler.sqlite3`
+- Remote workdir:
+  - `/root/work/cinderx-richards-exactcache-r2`
+
+### Goal
+
+- Re-test the exact-instance method-cache split idea, but this time with explicit shadowing safety, to see whether the tiny-wrapper hotspot still has extra headroom.
+
+### Change summary
+
+- Reintroduced the exact managed-dict method-cache split behind `PYTHONJITEXACTMETHODCACHESPLIT=1`.
+- Added safety:
+  - `LoadMethodCache::getValueHelper()` now falls back to a full lookup when slot-0 type or keys-version validation fails.
+- Added a regression:
+  - `test_exact_method_cache_split_respects_instance_shadowing`
+
+### Evidence
+
+- Targeted verify:
+  - `test_jit_force_compile_smoke` passed
+  - `test_exact_method_cache_split_respects_instance_shadowing` passed
+- Benchmark artifacts:
+  - `/root/work/arm-sync/richards_exactcache_off.json`
+  - `/root/work/arm-sync/richards_exactcache_on.json`
+
+### Benchmark delta
+
+- ARM:
+  - exact-cache split off `richards`: `0.2687889599s`
+  - exact-cache split on `richards`: `0.2726917050s`
+  - delta: `+1.45%`
+  - exact-cache split off `method_chain`: `0.0016532539s`
+  - exact-cache split on `method_chain`: `0.0016452830s`
+  - delta: `-0.48%`
+- x86 status:
+  - not rerun for this negative ARM-only follow-up
+
+### Decision
+
+- Status: `regressed`
+- Next action:
+  - keep the safe exact-instance split recorded as a rejected idea
+  - continue hunting in the tiny-wrapper call sequence family, but not with this cache-split structure
+- Risks or blockers:
+  - none specific to this candidate beyond the recorded regression
+
+### Retrospective
+
+- What went wrong or almost went wrong:
+  - the correctness-safe rewrite did exactly what it was supposed to do semantically, but it still failed to pay for itself on whole richards.
+- Why it was missed:
+  - the previous unsafe attempt never gave us a trustworthy end-to-end number once the required validity checks were restored.
+- New prevention rule:
+  - once correctness repairs materially change a fast path, re-benchmark from scratch and do not assume the hotspot economics stayed the same.
+
+## Round 2 - hir
+
+### Context
+
+- Case: `richards`
+- Stage: `hir`
+- Lease id / scheduler DB:
+  - compile: `12`
+  - verify: `13`
+  - benchmark: `14`
+  - scheduler: `plans/remote-scheduler.sqlite3`
+- Remote workdir:
+  - baseline: `/root/work/cinderx-richards-lmcache-r2`
+  - candidate: `/root/work/cinderx-richards-poly-r2`
+
+### Goal
+
+- Fix issue #44 directly by stopping monomorphic `LOAD_ATTR_METHOD_WITH_VALUES` lowering on polymorphic virtual-call receivers such as `Task.runTask -> self.fn(...)`.
+
+### Change summary
+
+- Added a builder gate:
+  - `LOAD_ATTR_METHOD_WITH_VALUES` only lowers through the monomorphic method-with-values fast path when `receiver->type().isExact()`
+  - otherwise it falls back to the generic method path
+- Added a regression:
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`
+
+### Evidence
+
+- Targeted verify:
+  - `test_jit_force_compile_smoke` passed
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts` passed
+- Direct benchmark artifacts:
+  - `/root/work/arm-sync/richards_polyfix_base.json`
+  - `/root/work/arm-sync/richards_polyfix_new.json`
+- Deopt probe:
+  - benchmark-file probe did not report method-with-values deopts on either side, so the synthetic regression is the sharper validation for this exact issue shape
+- Regression sweep artifacts:
+  - local: `artifacts/richards_issue44_round2_results_20260317_223500/`
+
+### Benchmark delta
+
+- ARM direct benchmark:
+  - baseline `richards`: `0.2724542680s`
+  - candidate `richards`: `0.1779967260s`
+  - delta: `-34.67%`
+  - baseline `method_chain`: `0.0016417440s`
+  - candidate `method_chain`: `0.0016625750s`
+  - delta: `+1.27%`
+- Requested regression sweep highlights:
+  - regressions:
+    - `comprehensions` `+7.34%`
+    - `spectral_norm` `+4.25%`
+    - `logging_format` `+3.26%`
+    - `scimark_sor` `+2.82%`
+    - `richards_super` `+2.54%`
+  - wins:
+    - `scimark_monte_carlo` `-9.02%`
+    - `coroutines` `-7.03%`
+    - `logging_simple` `-5.29%`
+    - `raytrace` `-4.88%`
+    - `go` `-3.98%`
+    - `richards` `-0.92%` in the pyperformance sweep itself
+
+### Decision
+
+- Status: `continue`
+- Next action:
+  - keep this builder gate as the current best fix for issue #44
+  - investigate the moderate regressions (`comprehensions`, `spectral_norm`, `richards_super`, `logging_format`, `scimark_sor`) before declaring it safe to land
+- Risks or blockers:
+  - no red-alert regressions appeared in the requested sweep, but there are enough `+2%` to `+7%` regressions that the change still needs follow-up before merge
+
+### Retrospective
+
+- What went right:
+  - the direct fix matched the real problem statement better than the earlier cache-shape experiments and immediately produced a large richards win.
+- Why it worked:
+  - it removes the bad specialization instead of trying to compensate for it later.
+- New prevention rule:
+  - when the issue is “wrong specialization for polymorphic receiver”, first ask whether the specialization should fire at all.
+
+## Round 2 - hir narrowing update
+
+### Context
+
+- Case: `richards`
+- Stage: `hir`
+- Lease id / scheduler DB:
+  - compile: `16`
+  - verify: `17`
+  - benchmark: `18`
+  - scheduler: `plans/remote-scheduler.sqlite3`
+- Remote workdir:
+  - candidate: `/root/work/cinderx-richards-poly2-r2`
+
+### Goal
+
+- Narrow the issue-#44 fix to the true problematic receiver class: non-exact local `self`.
+
+### Change summary
+
+- Builder gate changed from:
+  - disable `LOAD_ATTR_METHOD_WITH_VALUES` for all non-exact receivers
+- to:
+  - disable it only when the receiver is local arg0 named `self` and is not exact
+
+### Evidence
+
+- Targeted verify:
+  - `test_jit_force_compile_smoke` passed
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts` passed
+  - `test_exact_method_cache_split_respects_instance_shadowing` passed
+- Direct benchmark artifacts:
+  - `/root/work/arm-sync/richards_poly2_base.json`
+  - `/root/work/arm-sync/richards_poly2_new.json`
+- Focused regression subset artifacts:
+  - `/root/work/arm-sync/richards_poly2_regress_base_v2.json`
+  - `/root/work/arm-sync/richards_poly2_regress_new_v2.json`
+
+### Benchmark delta
+
+- ARM direct benchmark:
+  - baseline `richards`: `0.2744622920s`
+  - candidate `richards`: `0.1935804160s`
+  - delta: `-29.47%`
+  - baseline `method_chain`: `0.0016087320s`
+  - candidate `method_chain`: `0.0016213530s`
+  - delta: `+0.78%`
+- Focused regression subset:
+  - `comprehensions`: `-4.03%`
+  - `richards`: `-1.15%`
+  - `richards_super`: `-0.01%`
+  - `logging_format`: `+2.76%`
+  - `logging_silent`: `-1.41%`
+  - `logging_simple`: `-0.73%`
+
+### Decision
+
+- Status: `continue`
+- Next action:
+  - treat the self-only gate as the current best issue-#44 fix
+  - treat `logging_format` as likely noise after repeated sampling
+  - if needed, localize `logging_simple` next
+- Risks or blockers:
+  - no obvious target-family regressions remain
+  - a small `logging_simple` regression may still deserve explanation
+
+### Retrospective
+
+- What went right:
+  - narrowing the gate around the true receiver class preserved the richards win while recovering the clearly related collateral regressions.
+- Why it worked:
+  - the problematic shape is specifically polymorphic virtual dispatch on non-exact `self`, not generic non-exact method receivers.
+- New prevention rule:
+  - once a broad gate proves the direction, narrow it to the smallest receiver classification that still fixes the target issue.
+
+## Round 2 - logging repeat check
+
+### Context
+
+- Case: `richards`
+- Stage: `comparison`
+- Lease id / scheduler DB:
+  - benchmark: `19`
+  - scheduler: `plans/remote-scheduler.sqlite3`
+
+### Goal
+
+- Verify whether the residual `logging_format` regression from the focused subset was real or just debug-single-value noise.
+
+### Change summary
+
+- Re-ran `pyperformance logging` 5 times on:
+  - baseline: `/root/work/cinderx-richards-lmcache-r2`
+  - candidate: `/root/work/cinderx-richards-poly2-r2`
+- Compared medians for:
+  - `logging_format`
+  - `logging_silent`
+  - `logging_simple`
+
+### Benchmark delta
+
+- `logging_format`: `-0.76%`
+- `logging_silent`: `+0.78%`
+- `logging_simple`: `+2.35%`
+
+### Decision
+
+- Status: `complete`
+- Next action:
+  - drop `logging_format` as the main residual blocker
+  - if more residual cleanup is needed, look at `logging_simple` instead
+- Risks or blockers:
+  - no high-confidence logging regression remains beyond the small `logging_simple` signal
+
+### Retrospective
+
+- What went wrong or almost went wrong:
+  - a single-value `logging_format` sample looked worse than it really was.
+- Why it was missed:
+  - tiny benchmarks need repeated samples before we trust small deltas.
+- New prevention rule:
+  - for tiny residual regressions, repeat before patching.
