@@ -1844,6 +1844,136 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(float(lines[-1]), 1000.0, proc.stdout)
 
+    def test_path_dependent_mixed_numeric_accumulator_avoids_repeated_deopts(
+        self,
+    ) -> None:
+        # Regression guard:
+        # when a loop accumulator can be `int` on one path and `float` on
+        # another, we must not keep a loop-hot `GuardType<LongExact>` that
+        # deopts on every execution of the float path.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            KOMI = 7.5
+            WHITE = 1
+            BLACK = 2
+            EMPTY = 0
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Square:
+                __slots__ = ("color", "neighbours")
+
+                def __init__(self, color, neighbours=None):
+                    self.color = color
+                    self.neighbours = neighbours or []
+
+            class Board:
+                __slots__ = ("squares", "white_dead", "black_dead")
+
+                def __init__(self, squares, white_dead=0, black_dead=0):
+                    self.squares = squares
+                    self.white_dead = white_dead
+                    self.black_dead = black_dead
+
+                def score(self, color):
+                    if color == WHITE:
+                        score = KOMI + self.black_dead
+                    else:
+                        score = self.white_dead
+
+                    for square in self.squares:
+                        if square.color == color:
+                            score += 1
+                        elif square.color == EMPTY:
+                            count = 0
+                            for neighbour in square.neighbours:
+                                if neighbour.color == color:
+                                    count += 1
+                            if count == len(square.neighbours):
+                                score += 1
+
+                    return score
+
+            squares = []
+            for i in range(81):
+                c = WHITE if i % 3 != 0 else (BLACK if i % 3 == 1 else EMPTY)
+                squares.append(Square(c))
+
+            for sq in squares:
+                if sq.color == EMPTY:
+                    sq.neighbours = [s for s in squares[:4]]
+
+            board = Board(squares, white_dead=3, black_dead=5)
+
+            for _ in range(10000):
+                board.score(BLACK)
+
+            assert jit.force_compile(Board.score)
+            counts = cinderjit.get_function_hir_opcode_counts(Board.score)
+
+            jit.get_and_clear_runtime_stats()
+            black_result = 0
+            for _ in range(200):
+                black_result = board.score(BLACK)
+            black_stats = jit.get_and_clear_runtime_stats()
+
+            white_result = 0.0
+            for _ in range(200):
+                white_result = board.score(WHITE)
+            white_stats = jit.get_and_clear_runtime_stats()
+
+            black_deopt_count = sum(
+                entry["int"]["count"]
+                for entry in black_stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Board.score"
+            )
+            white_deopt_count = sum(
+                entry["int"]["count"]
+                for entry in white_stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Board.score"
+            )
+
+            print(counts.get("GuardType", 0))
+            print(counts.get("LongInPlaceOp", 0))
+            print(black_deopt_count)
+            print(white_deopt_count)
+            print(black_result)
+            print(white_result)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/mixed_numeric_accumulator_no_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertGreaterEqual(int(lines[-6]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 3, proc.stdout)
+            self.assertEqual(float(lines[-1]), 66.5, proc.stdout)
+
     def test_module_method_hir_uses_null_self_vectorcall(self) -> None:
         # Regression guard:
         # module LOAD_METHOD shapes on 3.14 should simplify to callable-only
