@@ -6,6 +6,121 @@ entrypoint:
 
 `scripts/push_to_arm.ps1` -> `scripts/arm/remote_update_build_test.sh`
 
+### Open case: deepcopy / issue #47
+
+- Date: `2026-03-18`
+- Branch/worktree:
+  - `codex/deepcopy-issue47`
+  - `C:/work/code/cinderx-deepcopy-issue47-20260318`
+- Base:
+  - `origin/bench-cur-7c361dce` @ `7fe48dd9`
+- Unified remote entrypoint:
+  - `scripts/push_to_arm.ps1`
+  - `/root/work/incoming/remote_update_build_test.sh`
+- Scheduler:
+  - tool: `C:/work/code/coroutines/cinderx/scripts/remote_scheduler.py`
+  - db: `C:/work/code/cinderx-deepcopy-issue47-20260318/plans/remote-scheduler.sqlite3`
+- Status:
+  - case files created
+  - latest branch baseline confirmed
+  - targeted ARM regression added for stdlib `copy` KeyError helpers
+  - next step is validating the HIR rewrite on ARM
+
+- Baseline evidence:
+  - Scheduler lease: `#1`
+  - Remote workspace: `/root/work/cinderx-deepcopy-issue47`
+  - Unified entrypoint:
+    - `/root/work/incoming/remote_update_build_test.sh`
+  - Default suite note:
+    - `test_arm_runtime.py` already contains unrelated historical failures on this branch, so it is not sufficient by itself to isolate issue `#47`.
+  - Focused target run:
+    - `ARM_RUNTIME_SKIP_TESTS=test_`
+    - `EXTRA_TEST_CMD=python -m unittest discover -s cinderx/PythonLib/test_cinderx -p test_arm_runtime.py -k deepcopy_keyerror_helpers_avoid_unhandledexception_deopts -v`
+  - Result on base:
+    - `_keep_alive` `UnhandledException/BinaryOp` deopts: `200`
+    - `_deepcopy_tuple` `UnhandledException/BinaryOp` deopts: `200`
+    - correctness total: `19900`
+  - Conclusion:
+    - issue `#47` reproduces deterministically on the latest `origin/bench-cur-7c361dce` base.
+
+- Follow-up HIR evidence:
+  - remote `dis` capture confirmed the ARM host sees the same 3.14 bytecode shape as local for both helpers.
+  - keepalive-only probe JSON after matcher narrowing:
+    - `_keep_alive` HIR counts now show the helper-based rewrite:
+      - `CallStatic=2`
+      - `CheckExc=1`
+      - `CheckNeg=1`
+      - `GuardType=1`
+      - `MakeList=1`
+      - `PrimitiveCompare=1`
+      - no `BinaryOp`
+    - direct deopt probe:
+      - `keep_alive_deopts=0`
+      - `elapsed=9.213600014845724e-05`
+    - conclusion:
+      - `_keep_alive` is fixed for the deterministic KeyError miss path
+  - combined helper probe:
+    - with `_deepcopy_tuple` rewrite disabled and `_keep_alive` rewrite active:
+      - `_keep_alive=0`
+      - `_deepcopy_tuple=200`
+      - `total=19900`
+    - earlier `_deepcopy_tuple` continuation rewrite caused a compile-time crash
+    - core backtrace pointed to:
+      - `jit::hir::Instr::numEdges(this=0x0)`
+      - `jit::hir::removeUnreachableBlocks()`
+      - during `HIRBuilder::buildHIR()`
+    - conclusion:
+      - the current `_deepcopy_tuple` rewrite is unsafe and must be redesigned before the next remote try
+
+  - keepalive sentinel lifetime fix:
+    - a static `Ref<>` miss sentinel caused an exit-time segfault in `Ref<_object>::~Ref`
+    - switching to a raw leaked `PyObject*` sentinel removed that crash
+
+  - `_deepcopy_tuple` helper-return redesign:
+    - miss path now calls `JITRT_DeepcopyTuplePostMiss(x, y)` and returns directly from the miss block
+    - combined probe result on ARM:
+      - `_keep_alive=0`
+      - `_deepcopy_tuple=0`
+      - `total=19900`
+      - `elapsed=0.00032323300001735333`
+    - prior partial-fix combined probe:
+      - `_keep_alive=0`
+      - `_deepcopy_tuple=200`
+      - `elapsed=0.0007303920001504594`
+    - conclusion:
+      - issue `#47` is fixed for the deterministic stdlib reproducer
+      - the final HIR round cut the combined probe time by about `55.75%` relative to the previous partial-fix state
+  - scheduler cleanup:
+    - lease `#3` released after evidence capture
+    - there are no active remote leases for this case now
+
+  - broader ARM regression sweep:
+    - artifacts:
+      - `artifacts/deepcopy/reg_compare.json`
+      - `artifacts/deepcopy/reg_focus_compare.json`
+    - broad 2-sample compare vs base:
+      - `coroutines` `-5.56%`
+      - `coverage` `-8.46%`
+      - `richards` `+3.68%`
+      - `comprehensions` `+9.31%`
+      - `logging_silent` `+51.94%`
+    - focused 5-sample rerun on `comprehensions,logging`:
+      - `comprehensions` `+3.89%`
+      - `logging_format` `+1.03%`
+      - `logging_simple` `-2.59%`
+      - `logging_silent` `+8.21%`
+    - conclusion:
+      - no material broad regression remains in the requested set
+      - `logging_silent` is still the only residual >5% signal, but the move is only about `+0.08 us`, so it is currently treated as a tiny residual rather than a blocker
+    - scheduler cleanup:
+      - lease `#4` released after the sweep
+      - there are no active remote leases now
+
+- Remote resource status:
+  - lease `#1` released cleanly
+  - scheduler DB now has no active leases
+  - later ARM SSH attempts started timing out, so the remote loop is currently paused
+
 ### Baseline (ARM JIT Functional + Gate Passing)
 
 - Date: 2026-02-16

@@ -182,6 +182,29 @@ PyObject* JITRT_LoadGlobalsDict(PyThreadState* tstate);
  */
 PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop);
 
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+/*
+ * Exact-dict item lookup for try/except KeyError lowering.
+ *
+ * Returns a new reference to the found value on hit, a private sentinel on
+ * miss without setting an exception, and NULL on real error.
+ */
+PyObject* JITRT_GetDictItemOrSentinel(PyObject* dict, PyObject* key);
+
+/*
+ * Return the private sentinel object used by JITRT_GetDictItemOrSentinel().
+ * The returned object is borrowed and must only be used for identity checks.
+ */
+PyObject* JITRT_GetDictItemMissSentinel(void);
+
+/*
+ * Finish the miss path of copy._deepcopy_tuple() without raising KeyError.
+ *
+ * Returns either a new reference to `x` or a new tuple built from `y`.
+ */
+PyObject* JITRT_DeepcopyTuplePostMiss(PyObject* x, PyObject* y);
+#endif
+
 /*
  * Helper to perform a Python call with dynamically determined arguments.
  *

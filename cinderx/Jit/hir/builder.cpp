@@ -21,6 +21,7 @@
 #include "cinderx/Jit/hir/annotation_index.h"
 #include "cinderx/Jit/hir/ssa.h"
 #include "cinderx/Jit/hir/type.h"
+#include "cinderx/Jit/jit_rt.h"
 #include "cinderx/Jit/threaded_compile.h"
 #include "cinderx/StaticPython/checked_dict.h"
 #include "cinderx/StaticPython/checked_list.h"
@@ -619,6 +620,186 @@ bool isInlineableSetGenexprCode(BorrowedRef<PyCodeObject> code) {
   }
   return std::strcmp(name, "<genexpr>") == 0;
 }
+
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+
+bool nameEquals(BorrowedRef<> obj, const char* expected) {
+  if (!PyUnicode_CheckExact(obj)) {
+    return false;
+  }
+  int cmp = PyUnicode_CompareWithASCIIString(obj, expected);
+  if (cmp < 0) {
+    PyErr_Clear();
+    return false;
+  }
+  return cmp == 0;
+}
+
+BorrowedRef<> loadGlobalName(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& instr) {
+  if (instr.opcode() != LOAD_GLOBAL) {
+    return nullptr;
+  }
+  return PyTuple_GET_ITEM(code->co_names, loadGlobalIndex(instr.oparg()));
+}
+
+BorrowedRef<> loadAttrName(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& instr) {
+  if (instr.opcode() != LOAD_ATTR) {
+    return nullptr;
+  }
+  return PyTuple_GET_ITEM(code->co_names, loadAttrIndex(instr.oparg()));
+}
+
+BytecodeInstruction skipHandlerNoops(BytecodeInstruction instr) {
+  while (instr.opcode() == NOT_TAKEN || instr.opcode() == NOP) {
+    instr = instr.nextInstr();
+  }
+  return instr;
+}
+
+struct DeepcopyDictSubscrPattern {
+  enum class Kind {
+    kKeepAliveInline,
+    kDeepcopyTupleHelperReturn,
+  };
+
+  Kind kind;
+  int x_local_idx{-1};
+  int y_local_idx{-1};
+  BCOffset build_list_off{-1};
+  BCOffset store_subscr_off{-1};
+};
+
+bool isCopyKeepAliveFunction(BorrowedRef<PyCodeObject> code) {
+  return nameEquals(code->co_name, "_keep_alive") && code->co_argcount == 2;
+}
+
+bool isCopyDeepcopyTupleFunction(BorrowedRef<PyCodeObject> code) {
+  return nameEquals(code->co_name, "_deepcopy_tuple") && code->co_argcount == 3;
+}
+
+int findLocalIndexByName(BorrowedRef<PyCodeObject> code, const char* name) {
+  int nlocalsplus = numLocalsplus(code);
+  for (int i = 0; i < nlocalsplus; ++i) {
+    if (nameEquals(jit::getVarname(code, i), name)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+std::optional<DeepcopyDictSubscrPattern> matchDeepcopyDictSubscrPattern(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& bc_instr) {
+  bool is_keep_alive = isCopyKeepAliveFunction(code);
+  bool is_deepcopy_tuple = isCopyDeepcopyTupleFunction(code);
+  if (!is_keep_alive && !is_deepcopy_tuple) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction handler_instr = bc_instr.nextInstr();
+  int max_scan = static_cast<int>(countIndices(code));
+  while (
+      max_scan-- > 0 &&
+      static_cast<size_t>(handler_instr.baseIndex().value()) <
+          countIndices(code) &&
+         handler_instr.opcode() != PUSH_EXC_INFO) {
+    handler_instr = handler_instr.nextInstr();
+  }
+  if (handler_instr.opcode() != PUSH_EXC_INFO) {
+    return std::nullopt;
+  }
+  handler_instr = handler_instr.nextInstr();
+  if (!nameEquals(loadGlobalName(code, handler_instr), "KeyError")) {
+    return std::nullopt;
+  }
+  handler_instr = handler_instr.nextInstr();
+  if (handler_instr.opcode() != CHECK_EXC_MATCH) {
+    return std::nullopt;
+  }
+  handler_instr = handler_instr.nextInstr();
+  if (handler_instr.opcode() != POP_JUMP_IF_FALSE) {
+    return std::nullopt;
+  }
+  handler_instr = skipHandlerNoops(handler_instr.nextInstr());
+  if (handler_instr.opcode() != POP_TOP) {
+    return std::nullopt;
+  }
+  BytecodeInstruction body_instr = skipHandlerNoops(handler_instr.nextInstr());
+
+  BytecodeInstruction next_instr = bc_instr.nextInstr();
+  if (is_keep_alive && next_instr.opcode() == LOAD_ATTR &&
+      nameEquals(loadAttrName(code, next_instr), "append")) {
+    BytecodeInstruction arg_instr = next_instr.nextInstr();
+    if (arg_instr.opcode() != LOAD_FAST_BORROW &&
+        arg_instr.opcode() != LOAD_FAST) {
+      return std::nullopt;
+    }
+    BytecodeInstruction call_instr = arg_instr.nextInstr();
+    if (call_instr.opcode() != CALL || call_instr.oparg() != 1) {
+      return std::nullopt;
+    }
+    BytecodeInstruction pop_top = call_instr.nextInstr();
+    if (pop_top.opcode() != POP_TOP) {
+      return std::nullopt;
+    }
+
+    if (body_instr.opcode() != LOAD_FAST) {
+      return std::nullopt;
+    }
+    int x_local_idx = body_instr.oparg();
+    BytecodeInstruction build_list = body_instr.nextInstr();
+    if (build_list.opcode() != BUILD_LIST || build_list.oparg() != 1) {
+      return std::nullopt;
+    }
+    BytecodeInstruction load_memo = build_list.nextInstr();
+    if (load_memo.opcode() != LOAD_FAST) {
+      return std::nullopt;
+    }
+    BytecodeInstruction load_id = load_memo.nextInstr();
+    if (!nameEquals(loadGlobalName(code, load_id), "id")) {
+      return std::nullopt;
+    }
+    BytecodeInstruction load_memo_again = load_id.nextInstr();
+    if (load_memo_again.opcode() != LOAD_FAST ||
+        load_memo_again.oparg() != load_memo.oparg()) {
+      return std::nullopt;
+    }
+    BytecodeInstruction call_id = load_memo_again.nextInstr();
+    if (call_id.opcode() != CALL || call_id.oparg() != 1) {
+      return std::nullopt;
+    }
+    BytecodeInstruction store_subscr = call_id.nextInstr();
+    if (store_subscr.opcode() != STORE_SUBSCR) {
+      return std::nullopt;
+    }
+    return DeepcopyDictSubscrPattern{
+        .kind = DeepcopyDictSubscrPattern::Kind::kKeepAliveInline,
+        .x_local_idx = x_local_idx,
+        .build_list_off = build_list.baseOffset(),
+        .store_subscr_off = store_subscr.baseOffset(),
+    };
+  }
+
+  if (is_deepcopy_tuple && next_instr.opcode() == RETURN_VALUE) {
+    int y_local_idx = findLocalIndexByName(code, "y");
+    if (y_local_idx < 0) {
+      return std::nullopt;
+    }
+    return DeepcopyDictSubscrPattern{
+        .kind = DeepcopyDictSubscrPattern::Kind::kDeepcopyTupleHelperReturn,
+        .x_local_idx = 0,
+        .y_local_idx = y_local_idx,
+    };
+  }
+
+  return std::nullopt;
+}
+
+#endif
 
 } // namespace
 
@@ -1240,7 +1421,7 @@ void HIRBuilder::translate(
         case BINARY_SUBTRACT:
         case BINARY_TRUE_DIVIDE:
         case BINARY_XOR: {
-          emitBinaryOp(tc, bc_instr);
+          emitBinaryOp(irfunc.cfg, tc, bc_instr);
           break;
         }
         case INPLACE_ADD:
@@ -2706,7 +2887,117 @@ void HIRBuilder::emitKwNames(
       kwnames_, Type::fromObject(PyTuple_GET_ITEM(code_->co_consts, index)));
 }
 
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+bool HIRBuilder::tryEmitDeepcopyDictSubscrRewrite(
+    CFG& cfg,
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr,
+    Register* container,
+    Register* subscript,
+    Register* result) {
+  auto pattern = matchDeepcopyDictSubscrPattern(code_, bc_instr);
+  if (!pattern.has_value()) {
+    return false;
+  }
+
+  if (bc_instr.specializedOpcode() != BINARY_SUBSCR_DICT) {
+    tc.emit<GuardType>(container, TDictExact, container, tc.frame);
+  }
+
+  PyObject* sentinel_obj = JITRT_GetDictItemMissSentinel();
+  if (sentinel_obj == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+
+  auto* call = tc.emit<CallStatic>(
+      2,
+      result,
+      reinterpret_cast<void*>(JITRT_GetDictItemOrSentinel),
+      TOptObject);
+  call->SetOperand(0, container);
+  call->SetOperand(1, subscript);
+  tc.emit<CheckExc>(result, result, tc.frame);
+
+  Register* sentinel = temps_.AllocateStack();
+  Register* is_miss = temps_.AllocateStack();
+  tc.emit<LoadConst>(sentinel, Type::fromObject(sentinel_obj));
+  tc.emit<PrimitiveCompare>(
+      is_miss, PrimitiveCompareOp::kEqual, result, sentinel);
+
+  BasicBlock* miss_block = cfg.AllocateBlock();
+  BasicBlock* hit_block = cfg.AllocateBlock();
+  tc.emit<CondBranch>(is_miss, miss_block, hit_block);
+
+  TranslationContext miss_tc{miss_block, tc.frame};
+  switch (pattern->kind) {
+    case DeepcopyDictSubscrPattern::Kind::kKeepAliveInline: {
+      JIT_CHECK(
+          pattern->x_local_idx >= 0 &&
+              pattern->x_local_idx <
+                  static_cast<int>(miss_tc.frame.localsplus.size()),
+          "invalid local index {}",
+          pattern->x_local_idx);
+      Register* x = miss_tc.frame.localsplus.at(pattern->x_local_idx);
+      JIT_CHECK(x != nullptr, "missing local register for keep_alive rewrite");
+
+      miss_tc.frame.stack.push(x);
+      emitMakeListTuple(
+          miss_tc, BytecodeInstruction{code_, pattern->build_list_off});
+      Register* list_value = miss_tc.frame.stack.pop();
+      miss_tc.frame.stack.push(list_value);
+      miss_tc.frame.stack.push(container);
+      miss_tc.frame.stack.push(subscript);
+      emitStoreSubscr(
+          cfg,
+          miss_tc,
+          BytecodeInstruction{code_, pattern->store_subscr_off});
+
+      Register* none = temps_.AllocateStack();
+      miss_tc.emit<LoadConst>(none, TNoneType);
+      miss_tc.emit<Return>(none, TNoneType);
+      break;
+    }
+    case DeepcopyDictSubscrPattern::Kind::kDeepcopyTupleHelperReturn: {
+      JIT_CHECK(
+          pattern->x_local_idx >= 0 &&
+              pattern->x_local_idx <
+                  static_cast<int>(miss_tc.frame.localsplus.size()),
+          "invalid x local index {}",
+          pattern->x_local_idx);
+      JIT_CHECK(
+          pattern->y_local_idx >= 0 &&
+              pattern->y_local_idx <
+                  static_cast<int>(miss_tc.frame.localsplus.size()),
+          "invalid y local index {}",
+          pattern->y_local_idx);
+      Register* x = miss_tc.frame.localsplus.at(pattern->x_local_idx);
+      Register* y = miss_tc.frame.localsplus.at(pattern->y_local_idx);
+      JIT_CHECK(x != nullptr, "missing x local register");
+      JIT_CHECK(y != nullptr, "missing y local register");
+
+      Register* miss_result = temps_.AllocateStack();
+      auto* helper_call = miss_tc.emit<CallStatic>(
+          2,
+          miss_result,
+          reinterpret_cast<void*>(JITRT_DeepcopyTuplePostMiss),
+          TOptObject);
+      helper_call->SetOperand(0, x);
+      helper_call->SetOperand(1, y);
+      miss_tc.emit<CheckExc>(miss_result, miss_result, miss_tc.frame);
+      miss_tc.emit<Return>(miss_result);
+      break;
+    }
+  }
+
+  tc.block = hit_block;
+  tc.frame.stack.push(result);
+  return true;
+}
+#endif
+
 void HIRBuilder::emitBinaryOp(
+    CFG& cfg,
     TranslationContext& tc,
     const jit::BytecodeInstruction& bc_instr) {
   auto& stack = tc.frame.stack;
@@ -2791,6 +3082,14 @@ void HIRBuilder::emitBinaryOp(
         opcodeName(opcode));
     op_kind = *opt_op_kind;
   }
+
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+  if (op_kind == BinaryOpKind::kSubscript &&
+      tryEmitDeepcopyDictSubscrRewrite(
+          cfg, tc, bc_instr, left, right, result)) {
+    return;
+  }
+#endif
 
   tc.emit<BinaryOp>(result, op_kind, left, right, tc.frame);
   stack.push(result);

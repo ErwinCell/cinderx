@@ -3835,6 +3835,78 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 2, proc.stdout)
             self.assertEqual(int(lines[-1]), 55, proc.stdout)
 
+    def test_deepcopy_keyerror_helpers_avoid_unhandledexception_deopts(self) -> None:
+        # Regression guard:
+        # stdlib deepcopy helpers rely on expected KeyError misses inside
+        # try/except blocks. Those misses should not linearly deopt as
+        # UnhandledException once the helpers are JIT-compiled.
+        code = textwrap.dedent(
+            """
+            import copy
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            assert jit.force_compile(copy._keep_alive)
+            assert jit.force_compile(copy._deepcopy_tuple)
+            assert jit.is_jit_compiled(copy._keep_alive)
+            assert jit.is_jit_compiled(copy._deepcopy_tuple)
+
+            jit.get_and_clear_runtime_stats()
+
+            total = 0
+            for i in range(200):
+                memo = {}
+                copy._keep_alive(i, memo)
+                total += copy._deepcopy_tuple((i, i + 1), memo)[0]
+
+            stats = jit.get_and_clear_runtime_stats()
+            keep_alive_deopts = 0
+            deepcopy_tuple_deopts = 0
+            for entry in stats.get("deopt", []):
+                normal = entry["normal"]
+                if normal.get("reason") != "UnhandledException":
+                    continue
+                if normal.get("description") != "BinaryOp":
+                    continue
+                count = entry["int"]["count"]
+                if normal.get("func_qualname") == "_keep_alive":
+                    keep_alive_deopts += count
+                elif normal.get("func_qualname") == "_deepcopy_tuple":
+                    deepcopy_tuple_deopts += count
+
+            print(keep_alive_deopts)
+            print(deepcopy_tuple_deopts)
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/deepcopy_keyerror_deopts.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 19900, proc.stdout)
+
 
 if __name__ == "__main__":
     # Keep incidental unittest/traceback paths interpreted unless a test

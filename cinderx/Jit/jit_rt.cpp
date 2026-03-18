@@ -42,6 +42,7 @@
 #endif
 
 #include <cmath>
+#include <mutex>
 
 // This is mostly taken from ceval.c _PyEval_EvalCodeWithName
 // We use the same logic to turn **args, nargsf, and kwnames into
@@ -927,6 +928,90 @@ PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop) {
   PySlice_AdjustIndices(PyList_GET_SIZE(list), &start_index, &stop_index, 1);
   return PyList_GetSlice(list, start_index, stop_index);
 }
+
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+
+namespace {
+
+PyObject* get_dict_item_miss_sentinel() {
+  static std::once_flag once;
+  static PyObject* sentinel = nullptr;
+  std::call_once(once, []() {
+    sentinel = PyCapsule_New(
+        reinterpret_cast<void*>(get_dict_item_miss_sentinel),
+        "cinderx.jit.dict_item_miss",
+        nullptr);
+  });
+  return sentinel;
+}
+
+} // namespace
+
+PyObject* JITRT_GetDictItemMissSentinel(void) {
+  return get_dict_item_miss_sentinel();
+}
+
+PyObject* JITRT_GetDictItemOrSentinel(PyObject* dict, PyObject* key) {
+  JIT_DCHECK(PyDict_CheckExact(dict), "expected exact dict");
+
+  PyObject* value = nullptr;
+  int rc = PyDict_GetItemRef(dict, key, &value);
+  if (rc > 0) {
+    return value;
+  }
+  if (rc == 0) {
+    PyObject* sentinel = get_dict_item_miss_sentinel();
+    return sentinel == nullptr ? nullptr : Py_NewRef(sentinel);
+  }
+  return nullptr;
+}
+
+PyObject* JITRT_DeepcopyTuplePostMiss(PyObject* x, PyObject* y) {
+  if (PyTuple_CheckExact(x) && PyList_CheckExact(y)) {
+    Py_ssize_t size = PyTuple_GET_SIZE(x);
+    if (PyList_GET_SIZE(y) == size) {
+      for (Py_ssize_t i = 0; i < size; ++i) {
+        if (PyTuple_GET_ITEM(x, i) != PyList_GET_ITEM(y, i)) {
+          return PySequence_Tuple(y);
+        }
+      }
+      return Py_NewRef(x);
+    }
+  }
+
+  Ref<> iter_x = Ref<>::steal(PyObject_GetIter(x));
+  if (iter_x == nullptr) {
+    return nullptr;
+  }
+  Ref<> iter_y = Ref<>::steal(PyObject_GetIter(y));
+  if (iter_y == nullptr) {
+    return nullptr;
+  }
+
+  while (true) {
+    Ref<> item_x = Ref<>::steal(PyIter_Next(iter_x));
+    if (item_x == nullptr) {
+      if (PyErr_Occurred()) {
+        return nullptr;
+      }
+      return Py_NewRef(x);
+    }
+
+    Ref<> item_y = Ref<>::steal(PyIter_Next(iter_y));
+    if (item_y == nullptr) {
+      if (PyErr_Occurred()) {
+        return nullptr;
+      }
+      return Py_NewRef(x);
+    }
+
+    if (item_x != item_y) {
+      return PySequence_Tuple(y);
+    }
+  }
+}
+
+#endif
 
 PyObject* JITRT_LoadFunctionIndirect(PyObject** func, PyObject* descr) {
   PyObject* res = *func;

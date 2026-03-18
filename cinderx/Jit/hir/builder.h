@@ -133,6 +133,7 @@ class HIRBuilder {
   void emitPushNull(TranslationContext& tc);
 
   void emitBinaryOp(
+      CFG& cfg,
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitUnaryNot(TranslationContext& tc);
@@ -266,6 +267,15 @@ class HIRBuilder {
   void emitInPlaceOp(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+  bool tryEmitDeepcopyDictSubscrRewrite(
+      CFG& cfg,
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr,
+      Register* container,
+      Register* subscript,
+      Register* result);
+#endif
   void emitBuildSlice(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
