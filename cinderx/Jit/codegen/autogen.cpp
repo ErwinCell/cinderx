@@ -680,6 +680,8 @@ alignas(16) static const uint64_t kDoubleAbsMask[2] = {
     0xffffffffffffffffULL,
 };
 
+arch::Mem AsmIndirectOperandBuilder(const OperandBase* operand);
+
 void translateFabs(Environ* env, const Instruction* instr) {
   const OperandBase* output = instr->output();
   const OperandBase* input = instr->getInput(0);
