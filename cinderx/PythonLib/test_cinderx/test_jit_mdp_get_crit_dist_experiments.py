@@ -1,0 +1,122 @@
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+
+import cinderx.jit
+
+
+@unittest.skipUnless(cinderx.jit.is_enabled(), "Tests functionality on cinderjit")
+class MdpGetCritDistExperimentTests(unittest.TestCase):
+    def test_get_crit_dist_fraction_min_avoids_float_guard_deopts(self) -> None:
+        code = textwrap.dedent(
+            """
+            import importlib.util
+            import json
+            from fractions import Fraction
+
+            import cinderx.jit as jit
+            import cinderjit
+
+            spec = importlib.util.spec_from_file_location(
+                "bm_mdp",
+                "/Users/luchen/Repo/pyperformance/pyperformance/data-files/benchmarks/bm_mdp/run_benchmark.py",
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            args = (50, Fraction(120, 64), 100, 100, 100, 100, 65, True, 2)
+            for _ in range(10000):
+                mod.getCritDist(*args)
+
+            assert jit.force_compile(mod.getCritDist)
+            counts = cinderjit.get_function_hir_opcode_counts(mod.getCritDist)
+            jit.get_and_clear_runtime_stats()
+
+            total = 0
+            for _ in range(5000):
+                dist = mod.getCritDist(*args)
+                total += sum(v.numerator for v in dist.values())
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "getCritDist"
+            )
+            summary = sorted((k, v.numerator, v.denominator) for k, v in dist.items())
+            print(counts.get("GuardType", 0))
+            print(counts.get("CompareBool", 0))
+            print(deopt_count)
+            print(json.dumps(summary))
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/mdp_get_crit_dist.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc_baseline = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc_baseline.returncode,
+                0,
+                f"stdout:\n{proc_baseline.stdout}\nstderr:\n{proc_baseline.stderr}",
+            )
+
+            env_optimized = dict(os.environ)
+            env_optimized["PYTHONJIT_ARM_MDP_FRACTION_MIN_COMPARE"] = "1"
+            proc_optimized = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env_optimized,
+            )
+            self.assertEqual(
+                proc_optimized.returncode,
+                0,
+                f"stdout:\n{proc_optimized.stdout}\nstderr:\n{proc_optimized.stderr}",
+            )
+
+            baseline = [
+                line.strip() for line in proc_baseline.stdout.splitlines() if line.strip()
+            ]
+            optimized = [
+                line.strip() for line in proc_optimized.stdout.splitlines() if line.strip()
+            ]
+            self.assertEqual(len(baseline), 5, proc_baseline.stdout)
+            self.assertEqual(len(optimized), 5, proc_optimized.stdout)
+
+            b_guard_type = int(baseline[0])
+            b_compare_bool = int(baseline[1])
+            b_deopt = int(baseline[2])
+            b_summary = baseline[3]
+            b_total = int(baseline[4])
+
+            o_guard_type = int(optimized[0])
+            o_compare_bool = int(optimized[1])
+            o_deopt = int(optimized[2])
+            o_summary = optimized[3]
+            o_total = int(optimized[4])
+
+            self.assertGreater(b_guard_type, 0, proc_baseline.stdout)
+            self.assertEqual(b_compare_bool, 0, proc_baseline.stdout)
+            self.assertGreater(b_deopt, 0, proc_baseline.stdout)
+            self.assertEqual(b_summary, o_summary, (proc_baseline.stdout, proc_optimized.stdout))
+            self.assertEqual(b_total, o_total, (proc_baseline.stdout, proc_optimized.stdout))
+            self.assertGreaterEqual(o_compare_bool, 1, proc_optimized.stdout)
+            self.assertLess(o_deopt, b_deopt, (proc_baseline.stdout, proc_optimized.stdout))
