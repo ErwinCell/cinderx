@@ -3849,3 +3849,97 @@ Conclusion:
   - strong target gain
   - no broad regression
   - one small `richards` slowdown explicitly recorded
+
+## 2026-03-19 Issue 49: polymorphic loop method deopts
+
+### Scope
+
+- Issue:
+  - `#49`
+- Files:
+  - `cinderx/Jit/hir/builder.cpp`
+  - `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+- Change:
+  - restrict `LOAD_ATTR_METHOD_WITH_VALUES` lowering to receivers with a stable
+    exact runtime type in HIR
+  - add a loop-local polymorphic method regression
+
+### Root cause
+
+- `cinderx/Jit/hir/builder.cpp`
+  - `canUseMethodWithValuesFastPath()` allowed the fast path for any non-`self`
+    receiver when the descriptor owner had no subclasses
+  - this let generic polymorphic receivers be lowered to:
+    - guard on one type/version
+    - constant method descriptor
+    - direct call
+  - on the rarer type, the site repeatedly deopted at
+    `LOAD_ATTR_METHOD_WITH_VALUES`
+
+### Pre-fix signal
+
+- Existing regression before the fix:
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`
+    - `LoadMethod = 0`
+    - `LoadMethodCached = 0`
+    - `deopt_count = 10000`
+- New loop-local reproducer before the fix:
+  - `test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts`
+    - `LoadMethod = 0`
+    - `LoadMethodCached = 0`
+    - relevant deopt entries `= 1`
+    - relevant deopt count `= 2000`
+
+### ARM validation
+
+- Standard remote entry wrapper:
+  - `/root/work/incoming/issue49_remote_git_entry.sh`
+  - delegates to `scripts/arm/remote_update_build_test.sh`
+  - syncs source via a local `git bundle`, then archives on the ARM host
+- Targeted runtime regressions:
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`: `OK`
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`: `OK`
+  - `test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts`: `OK`
+
+### DeltaBlue
+
+- Probe result after the fix:
+  - `LoadMethodCached = 1`
+  - `deopt_entries = 0`
+  - `deopt_count = 0`
+  - repeated probe elapsed: `0.2982233840011759 s`
+- `pyperformance deltablue`:
+  - `3.73 ms`
+
+### Guardrail subset
+
+- `generators`: `32.9 ms`
+- `coroutines`: `28.2 ms`
+- `comprehensions`: `37.3 us`
+- `richards`: `51.8 ms`
+- `richards_super`: `58.8 ms`
+- `float`: `89.7 ms`
+- `go`: `126 ms`
+- `deltablue`: `3.75 ms`
+- `raytrace`: `356 ms`
+- `nqueens`: `120 ms`
+- `nbody`: `140 ms`
+- `unpack_sequence`: `120 ns`
+- `fannkuch`: `521 ms`
+- `coverage`: `104 ms`
+- `scimark_fft`: `489 ms`
+- `scimark_lu`: `174 ms`
+- `scimark_monte_carlo`: `91.5 ms`
+- `scimark_sor`: `160 ms`
+- `scimark_sparse_mat_mult`: `7.85 ms`
+- `spectral_norm`: `148 ms`
+- `chaos`: `76.3 ms`
+- `logging_format`: `20.7 us`
+- `logging_silent`: `808 ns`
+- `logging_simple`: `15.8 us`
+
+### Note
+
+- The current remote entry still reports an unrelated pyperformance
+  worker-startup verification problem (`jit was not enabled in the worker`)
+  after the targeted tests and benchmark commands have already completed.
