@@ -72,12 +72,14 @@ class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
             with open(script, "w", encoding="utf-8") as fp:
                 fp.write(code)
 
+            env_baseline = dict(os.environ)
+            env_baseline["PYTHONJIT_ARM_MDP_PRIORITY_COMPARE_ADD"] = "0"
             proc_baseline = subprocess.run(
                 [sys.executable, script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=dict(os.environ),
+                env=env_baseline,
             )
             self.assertEqual(
                 proc_baseline.returncode,
@@ -85,29 +87,27 @@ class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
                 f"stdout:\n{proc_baseline.stdout}\nstderr:\n{proc_baseline.stderr}",
             )
 
-            env_optimized = dict(os.environ)
-            env_optimized["PYTHONJIT_ARM_MDP_PRIORITY_COMPARE_ADD"] = "1"
-            proc_optimized = subprocess.run(
+            proc_default = subprocess.run(
                 [sys.executable, script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=env_optimized,
+                env=dict(os.environ),
             )
             self.assertEqual(
-                proc_optimized.returncode,
+                proc_default.returncode,
                 0,
-                f"stdout:\n{proc_optimized.stdout}\nstderr:\n{proc_optimized.stderr}",
+                f"stdout:\n{proc_default.stdout}\nstderr:\n{proc_default.stderr}",
             )
 
             baseline = [
                 line.strip() for line in proc_baseline.stdout.splitlines() if line.strip()
             ]
             optimized = [
-                line.strip() for line in proc_optimized.stdout.splitlines() if line.strip()
+                line.strip() for line in proc_default.stdout.splitlines() if line.strip()
             ]
             self.assertEqual(len(baseline), 3, proc_baseline.stdout)
-            self.assertEqual(len(optimized), 3, proc_optimized.stdout)
+            self.assertEqual(len(optimized), 3, proc_default.stdout)
 
             b_binary_op = int(baseline[0])
             b_long_binary_op = int(baseline[1])
@@ -117,10 +117,10 @@ class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
             o_long_binary_op = int(optimized[1])
             o_summary = optimized[2]
 
-            self.assertEqual(b_summary, o_summary, (proc_baseline.stdout, proc_optimized.stdout))
-            self.assertLess(o_binary_op, b_binary_op, (proc_baseline.stdout, proc_optimized.stdout))
+            self.assertEqual(b_summary, o_summary, (proc_baseline.stdout, proc_default.stdout))
+            self.assertLess(o_binary_op, b_binary_op, (proc_baseline.stdout, proc_default.stdout))
             self.assertGreaterEqual(
                 o_long_binary_op,
                 b_long_binary_op,
-                (proc_baseline.stdout, proc_optimized.stdout),
+                (proc_baseline.stdout, proc_default.stdout),
             )
