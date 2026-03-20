@@ -3801,6 +3801,248 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(lines[-2], "IndexError", proc.stdout)
             self.assertIn("list index out of range", lines[-1], proc.stdout)
 
+    def test_tuple_genexpr_eliminates_generator_call(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f():
+                return tuple(i * 2 for i in range(8))
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("CallMethod", 0))
+            print(counts.get("MakeFunction", 0))
+            print(counts.get("MakeList", 0))
+            print(counts.get("InvokeIterNext", 0))
+            print(counts.get("ListAppend", 0))
+            print(counts.get("MakeTupleFromList", 0))
+            print(f())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tuple_genexpr_inline.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 7, proc.stdout)
+            self.assertEqual(int(lines[-7]), 0, proc.stdout)
+            self.assertEqual(int(lines[-6]), 0, proc.stdout)
+            self.assertEqual(int(lines[-5]), 1, proc.stdout)
+            self.assertEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(lines[-1], "(0, 2, 4, 6, 8, 10, 12, 14)", proc.stdout)
+
+    def test_tuple_genexpr_with_closure_eliminates_generator_call(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(vec, cols):
+                return tuple(vec[i] + i for i in cols)
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("CallMethod", 0))
+            print(counts.get("MakeList", 0))
+            print(counts.get("InvokeIterNext", 0))
+            print(counts.get("ListAppend", 0))
+            print(counts.get("MakeTupleFromList", 0))
+            print(f([10, 20, 30, 40], range(4)))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tuple_genexpr_closure_inline.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            self.assertEqual(int(lines[-6]), 0, proc.stdout)
+            self.assertEqual(int(lines[-5]), 1, proc.stdout)
+            self.assertEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(lines[-1], "(10, 21, 32, 43)", proc.stdout)
+
+    def test_tuple_genexpr_preserves_exception_behavior(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(xs):
+                return tuple(10 // x for x in xs)
+
+            assert jit.force_compile(f)
+
+            try:
+                f([5, 0, 2])
+            except Exception as e:
+                print(type(e).__name__)
+                print(str(e))
+            else:
+                print("NO_EXCEPTION")
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tuple_genexpr_exception.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(lines[-2], "ZeroDivisionError", proc.stdout)
+            self.assertEqual(lines[-1], "division by zero", proc.stdout)
+
+    def test_tuple_genexpr_with_closure_preserves_exception_behavior(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(vec, cols):
+                return tuple(vec[i] + i for i in cols)
+
+            assert jit.force_compile(f)
+
+            try:
+                f([10, 20], range(4))
+            except Exception as e:
+                print(type(e).__name__)
+                print(str(e))
+            else:
+                print("NO_EXCEPTION")
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tuple_genexpr_closure_exception.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(lines[-2], "IndexError", proc.stdout)
+            self.assertIn("list index out of range", lines[-1], proc.stdout)
+
+    def test_tuple_genexpr_yield_shape_eliminates_generator_call(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def f(pool, indices, r):
+                yield tuple(pool[i] for i in indices[:r])
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("CallMethod", 0))
+            print(counts.get("MakeList", 0))
+            print(counts.get("ListAppend", 0))
+            print(counts.get("MakeTupleFromList", 0))
+            print(list(f([10, 20, 30, 40], range(4), 3)))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/tuple_genexpr_yield_inline.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(lines[-1], "[(10, 20, 30)]", proc.stdout)
+
     def test_recursive_coroutine_fibonacci_force_compile(self) -> None:
         # Regression guard:
         # the recursive coroutine shape used by pyperformance `coroutines`

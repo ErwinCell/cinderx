@@ -414,6 +414,15 @@ bool isBuiltinSetType(Register* reg) {
       reinterpret_cast<PyObject*>(&PySet_Type);
 }
 
+bool isEmptyListCollector(Register* reg) {
+  reg = chaseAssign(reg);
+  if (reg == nullptr || !reg->instr()->IsMakeList()) {
+    return false;
+  }
+  auto* make_list = static_cast<MakeList*>(reg->instr());
+  return make_list->nvalues() == 0;
+}
+
 bool isNullSentinel(Register* reg) {
   reg = chaseAssign(reg);
   if (reg == nullptr) {
@@ -426,6 +435,84 @@ bool isNullSentinel(Register* reg) {
     return static_cast<LoadConst*>(reg->instr())->type() <= TNullptr;
   }
   return false;
+}
+
+bool isJumpTo(const BytecodeInstruction& instr, BCOffset target) {
+  return instr.isBranch() && instr.getJumpTarget() == target;
+}
+
+bool isTupleCollectorFinalize(const BytecodeInstruction& instr) {
+  if (instr.opcode() == LIST_TO_TUPLE) {
+    return true;
+  }
+  if (instr.opcode() != CALL_INTRINSIC_1) {
+    return false;
+  }
+#if PY_VERSION_HEX >= 0x030C0000
+  return instr.oparg() == INTRINSIC_LIST_TO_TUPLE;
+#else
+  return false;
+#endif
+}
+
+struct TupleGenexprPattern {
+  std::optional<BCOffset> resume_off;
+  bool returns_directly{false};
+};
+
+std::optional<TupleGenexprPattern> matchInlineableTupleGenexprPattern(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& call_instr) {
+  if (call_instr.opcode() != CALL || call_instr.oparg() != 0) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction loop_header = call_instr.nextInstr();
+  if (loop_header.opcode() != FOR_ITER) {
+    return std::nullopt;
+  }
+
+  BCOffset cleanup_off = loop_header.getJumpTarget();
+  BytecodeInstruction list_append = loop_header.nextInstr();
+  if (list_append.opcode() != LIST_APPEND || list_append.oparg() != 2) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction loop_jump = list_append.nextInstr();
+  if (!isJumpTo(loop_jump, loop_header.baseOffset())) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction cleanup{code, cleanup_off};
+  BytecodeInstruction cleanup_pop_iter = cleanup;
+  if (cleanup.opcode() == END_FOR) {
+    cleanup_pop_iter = cleanup.nextInstr();
+  }
+  if (cleanup_pop_iter.opcode() != POP_ITER) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction finalize = cleanup_pop_iter.nextInstr();
+  if (!isTupleCollectorFinalize(finalize)) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction next_instr = finalize.nextInstr();
+  if (next_instr.opcode() == RETURN_VALUE) {
+    return TupleGenexprPattern{
+        /*resume_off=*/std::nullopt,
+        /*returns_directly=*/true};
+  }
+
+  if (next_instr.isBranch()) {
+    return TupleGenexprPattern{
+        /*resume_off=*/next_instr.getJumpTarget(),
+        /*returns_directly=*/false};
+  }
+
+  return TupleGenexprPattern{
+      /*resume_off=*/next_instr.baseOffset(),
+      /*returns_directly=*/false};
 }
 
 bool isKnownCoroutineFunction(BorrowedRef<> obj) {
@@ -1873,7 +1960,7 @@ void HIRBuilder::translate(
         }
         case YIELD_VALUE: {
           if (inline_genexpr_exit_ != nullptr) {
-            emitInlineSetGenexprYield(tc, bc_instr);
+            emitInlineGenexprYield(tc, bc_instr);
             break;
           }
           emitYieldValue(tc, bc_instr);
@@ -2058,6 +2145,11 @@ void HIRBuilder::translate(
         default: {
           JIT_ABORT("Unhandled opcode {} ({})", opcode, opcodeName(opcode));
         }
+      }
+      if (stop_block_translation_) {
+        stop_block_translation_ = false;
+        prev_bc_instr = *bc_it;
+        break;
       }
       prev_bc_instr = *bc_it;
     }
@@ -2402,6 +2494,9 @@ void HIRBuilder::emitAnyCall(
   if (tryInlineSetGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
     return;
   }
+  if (tryInlineTupleGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
+    return;
+  }
   bool is_awaited;
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     is_awaited = false;
@@ -2579,7 +2674,8 @@ InlineResult HIRBuilder::inlineGenexprHIR(
     BorrowedRef<PyCodeObject> gen_code,
     Register* iterable,
     Register* closure_tuple,
-    Register* collector) {
+    Register* collector,
+    InlineGenexprCollectorKind collector_kind) {
   auto preloader = Preloader::makePreloader(
       gen_code,
       preloader_.builtins(),
@@ -2593,6 +2689,7 @@ InlineResult HIRBuilder::inlineGenexprHIR(
 
   HIRBuilder inner_builder(*preloader);
   inner_builder.inline_genexpr_collector_ = collector;
+  inner_builder.inline_genexpr_collector_kind_ = collector_kind;
   inner_builder.inline_genexpr_closure_ = closure_tuple;
   inner_builder.inline_genexpr_exit_ = caller->cfg.AllocateBlock();
 
@@ -2672,7 +2769,8 @@ bool HIRBuilder::inlineSetGenexpr(
       gen_code,
       iterable,
       closure_tuple,
-      result);
+      result,
+      InlineGenexprCollectorKind::kSet);
   if (inline_result.entry == nullptr || inline_result.exit == nullptr) {
     return false;
   }
@@ -2734,6 +2832,81 @@ bool HIRBuilder::tryInlineSetGenexprCall(
   }
 
   bc_it = next_it;
+  return true;
+}
+
+bool HIRBuilder::tryInlineTupleGenexprCall(
+    Function& irfunc,
+    CFG& cfg,
+    TranslationContext& tc,
+    jit::BytecodeInstructionBlock::Iterator& bc_it,
+    const jit::BytecodeInstructionBlock& /* bc_instrs */) {
+  BytecodeInstruction bc_instr = *bc_it;
+  if (bc_instr.opcode() != CALL || bc_instr.oparg() != 0 || kwnames_ != nullptr ||
+      tc.frame.stack.size() < 3) {
+    return false;
+  }
+
+  Register* iterable = tc.frame.stack.top();
+  Register* genfunc = tc.frame.stack.top(1);
+  Register* collector = tc.frame.stack.top(2);
+
+  bool has_empty_list_collector = isEmptyListCollector(collector);
+  if (!has_empty_list_collector) {
+    return false;
+  }
+
+  BorrowedRef<PyCodeObject> gen_code = getMakeFunctionCode(genfunc);
+  bool inlineable_genexpr = isInlineableSetGenexprCode(gen_code);
+  if (!inlineable_genexpr) {
+    return false;
+  }
+
+  auto pattern = matchInlineableTupleGenexprPattern(code_, bc_instr);
+  if (!pattern.has_value()) {
+    return false;
+  }
+
+  Register* closure_tuple = findFunctionClosure(tc.block, genfunc);
+  if (numFreevars(gen_code) != 0 && closure_tuple == nullptr) {
+    return false;
+  }
+
+  InlineResult inline_result = inlineGenexprHIR(
+      &irfunc,
+      &tc.frame,
+      gen_code,
+      iterable,
+      closure_tuple,
+      collector,
+      InlineGenexprCollectorKind::kList);
+  if (inline_result.entry == nullptr || inline_result.exit == nullptr) {
+    return false;
+  }
+
+  Register* result = temps_.AllocateStack();
+  tc.emit<Branch>(inline_result.entry);
+  tc.block = inline_result.exit;
+  tc.emit<MakeTupleFromList>(result, collector, tc.frame);
+
+  auto& stack = tc.frame.stack;
+  stack.pop();
+  stack.pop();
+  stack.pop();
+  if (pattern->returns_directly) {
+    Type ret_type = preloader_.returnType();
+    if (getConfig().refine_static_python && ret_type < TObject) {
+      tc.emit<RefineType>(result, ret_type, result);
+    }
+    tc.emit<Return>(result, ret_type);
+  } else {
+    JIT_CHECK(
+        pattern->resume_off.has_value(),
+        "tuple genexpr pattern should provide resume offset when not returning");
+    stack.push(result);
+    tc.emit<Branch>(getBlockAtOff(*pattern->resume_off));
+  }
+  stop_block_translation_ = true;
   return true;
 }
 
@@ -5931,7 +6104,7 @@ void HIRBuilder::emitSetAdd(
   tc.emit<SetSetItem>(result, set, v, tc.frame);
 }
 
-void HIRBuilder::emitInlineSetGenexprYield(
+void HIRBuilder::emitInlineGenexprYield(
     TranslationContext& tc,
     const jit::BytecodeInstruction& /* bc_instr */) {
   JIT_CHECK(
@@ -5939,7 +6112,15 @@ void HIRBuilder::emitInlineSetGenexprYield(
       "inline genexpr collector should be initialized");
   auto yielded = tc.frame.stack.pop();
   auto result = temps_.AllocateStack();
-  tc.emit<SetSetItem>(result, inline_genexpr_collector_, yielded, tc.frame);
+  switch (inline_genexpr_collector_kind_) {
+    case InlineGenexprCollectorKind::kSet:
+      tc.emit<SetSetItem>(result, inline_genexpr_collector_, yielded, tc.frame);
+      return;
+    case InlineGenexprCollectorKind::kList:
+      tc.emit<ListAppend>(result, inline_genexpr_collector_, yielded, tc.frame);
+      return;
+  }
+  JIT_ABORT("Unhandled inline genexpr collector kind");
 }
 
 void HIRBuilder::emitSetUpdate(

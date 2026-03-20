@@ -92,6 +92,11 @@ struct InlineResult {
   BasicBlock* exit{nullptr};
 };
 
+enum class InlineGenexprCollectorKind {
+  kSet,
+  kList,
+};
+
 class HIRBuilder {
  public:
   explicit HIRBuilder(const Preloader& preloader)
@@ -147,6 +152,12 @@ class HIRBuilder {
       jit::BytecodeInstructionBlock::Iterator& bc_it,
       const jit::BytecodeInstructionBlock& bc_instrs);
   bool tryInlineSetGenexprCall(
+      Function& irfunc,
+      CFG& cfg,
+      TranslationContext& tc,
+      jit::BytecodeInstructionBlock::Iterator& bc_it,
+      const jit::BytecodeInstructionBlock& bc_instrs);
+  bool tryInlineTupleGenexprCall(
       Function& irfunc,
       CFG& cfg,
       TranslationContext& tc,
@@ -448,7 +459,7 @@ class HIRBuilder {
   void emitSetAdd(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
-  void emitInlineSetGenexprYield(
+  void emitInlineGenexprYield(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr);
   void emitSetUpdate(
@@ -518,7 +529,8 @@ class HIRBuilder {
       BorrowedRef<PyCodeObject> gen_code,
       Register* iterable,
       Register* closure_tuple,
-      Register* collector);
+      Register* collector,
+      InlineGenexprCollectorKind collector_kind);
 
   BorrowedRef<> constArg(const jit::BytecodeInstruction& bc_instr);
 
@@ -596,9 +608,12 @@ class HIRBuilder {
 
   OperandStack static_method_stack_;
   Register* inline_genexpr_collector_{nullptr};
+  InlineGenexprCollectorKind inline_genexpr_collector_kind_{
+      InlineGenexprCollectorKind::kSet};
   Register* inline_genexpr_closure_{nullptr};
   BasicBlock* inline_genexpr_exit_{nullptr};
   std::vector<std::unique_ptr<FrameState>> inline_genexpr_parent_frames_;
+  bool stop_block_translation_{false};
 };
 
 } // namespace jit::hir
