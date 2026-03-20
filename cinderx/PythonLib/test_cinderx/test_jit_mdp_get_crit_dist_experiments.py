@@ -64,12 +64,14 @@ class MdpGetCritDistExperimentTests(unittest.TestCase):
             with open(script, "w", encoding="utf-8") as fp:
                 fp.write(code)
 
+            env_baseline = dict(os.environ)
+            env_baseline["PYTHONJIT_ARM_MDP_FRACTION_MIN_COMPARE"] = "0"
             proc_baseline = subprocess.run(
                 [sys.executable, script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=dict(os.environ),
+                env=env_baseline,
             )
             self.assertEqual(
                 proc_baseline.returncode,
@@ -77,29 +79,27 @@ class MdpGetCritDistExperimentTests(unittest.TestCase):
                 f"stdout:\n{proc_baseline.stdout}\nstderr:\n{proc_baseline.stderr}",
             )
 
-            env_optimized = dict(os.environ)
-            env_optimized["PYTHONJIT_ARM_MDP_FRACTION_MIN_COMPARE"] = "1"
-            proc_optimized = subprocess.run(
+            proc_default = subprocess.run(
                 [sys.executable, script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env=env_optimized,
+                env=dict(os.environ),
             )
             self.assertEqual(
-                proc_optimized.returncode,
+                proc_default.returncode,
                 0,
-                f"stdout:\n{proc_optimized.stdout}\nstderr:\n{proc_optimized.stderr}",
+                f"stdout:\n{proc_default.stdout}\nstderr:\n{proc_default.stderr}",
             )
 
             baseline = [
                 line.strip() for line in proc_baseline.stdout.splitlines() if line.strip()
             ]
             optimized = [
-                line.strip() for line in proc_optimized.stdout.splitlines() if line.strip()
+                line.strip() for line in proc_default.stdout.splitlines() if line.strip()
             ]
             self.assertEqual(len(baseline), 5, proc_baseline.stdout)
-            self.assertEqual(len(optimized), 5, proc_optimized.stdout)
+            self.assertEqual(len(optimized), 5, proc_default.stdout)
 
             b_guard_type = int(baseline[0])
             b_compare_bool = int(baseline[1])
@@ -116,7 +116,7 @@ class MdpGetCritDistExperimentTests(unittest.TestCase):
             self.assertGreater(b_guard_type, 0, proc_baseline.stdout)
             self.assertEqual(b_compare_bool, 0, proc_baseline.stdout)
             self.assertGreater(b_deopt, 0, proc_baseline.stdout)
-            self.assertEqual(b_summary, o_summary, (proc_baseline.stdout, proc_optimized.stdout))
-            self.assertEqual(b_total, o_total, (proc_baseline.stdout, proc_optimized.stdout))
-            self.assertGreaterEqual(o_compare_bool, 1, proc_optimized.stdout)
-            self.assertLess(o_deopt, b_deopt, (proc_baseline.stdout, proc_optimized.stdout))
+            self.assertEqual(b_summary, o_summary, (proc_baseline.stdout, proc_default.stdout))
+            self.assertEqual(b_total, o_total, (proc_baseline.stdout, proc_default.stdout))
+            self.assertGreaterEqual(o_compare_bool, 1, proc_default.stdout)
+            self.assertLess(o_deopt, b_deopt, (proc_baseline.stdout, proc_default.stdout))

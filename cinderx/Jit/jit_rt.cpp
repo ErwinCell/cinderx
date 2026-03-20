@@ -42,6 +42,7 @@
 #endif
 
 #include <cmath>
+#include <mutex>
 
 // This is mostly taken from ceval.c _PyEval_EvalCodeWithName
 // We use the same logic to turn **args, nargsf, and kwnames into
@@ -928,268 +929,89 @@ PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop) {
   return PyList_GetSlice(list, start_index, stop_index);
 }
 
-PyObject* JITRT_ListConcat(PyObject* left, PyObject* right) {
-  if (PyList_CheckExact(left) && PyList_CheckExact(right)) {
-    return PyList_Type.tp_as_sequence->sq_concat(left, right);
-  }
-  return PyNumber_Add(left, right);
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+
+namespace {
+
+PyObject* get_dict_item_miss_sentinel() {
+  static std::once_flag once;
+  static PyObject* sentinel = nullptr;
+  std::call_once(once, []() {
+    sentinel = PyCapsule_New(
+        reinterpret_cast<void*>(get_dict_item_miss_sentinel),
+        "cinderx.jit.dict_item_miss",
+        nullptr);
+  });
+  return sentinel;
 }
 
-static bool raytraceAddColoursTryUnbox(PyObject* obj, double* out) {
-  if (PyFloat_CheckExact(obj)) {
-    *out = PyFloat_AS_DOUBLE(obj);
-    return true;
-  }
-  if (PyLong_CheckExact(obj)) {
-    double value = PyLong_AsDouble(obj);
-    if (value == -1.0 && PyErr_Occurred()) {
-      return false;
-    }
-    *out = value;
-    return true;
-  }
-  return false;
+} // namespace
+
+PyObject* JITRT_GetDictItemMissSentinel(void) {
+  return get_dict_item_miss_sentinel();
 }
 
-PyObject* JITRT_RaytraceAddColoursTupleFloatHelper(
-    PyObject* left,
-    PyObject* scale,
-    PyObject* right) {
-  if (PyTuple_CheckExact(left) && PyTuple_CheckExact(right) &&
-      PyTuple_GET_SIZE(left) == 3 && PyTuple_GET_SIZE(right) == 3 &&
-      PyFloat_CheckExact(scale)) {
-    double scale_value = PyFloat_AS_DOUBLE(scale);
-    double left_values[3];
-    double right_values[3];
-    for (Py_ssize_t i = 0; i < 3; i++) {
-      if (!raytraceAddColoursTryUnbox(PyTuple_GET_ITEM(left, i), &left_values[i]) ||
-          !raytraceAddColoursTryUnbox(PyTuple_GET_ITEM(right, i), &right_values[i])) {
-        PyErr_Clear();
-        goto generic_fallback;
+PyObject* JITRT_GetDictItemOrSentinel(PyObject* dict, PyObject* key) {
+  JIT_DCHECK(PyDict_CheckExact(dict), "expected exact dict");
+
+  PyObject* value = nullptr;
+  int rc = PyDict_GetItemRef(dict, key, &value);
+  if (rc > 0) {
+    return value;
+  }
+  if (rc == 0) {
+    PyObject* sentinel = get_dict_item_miss_sentinel();
+    return sentinel == nullptr ? nullptr : Py_NewRef(sentinel);
+  }
+  return nullptr;
+}
+
+PyObject* JITRT_DeepcopyTuplePostMiss(PyObject* x, PyObject* y) {
+  if (PyTuple_CheckExact(x) && PyList_CheckExact(y)) {
+    Py_ssize_t size = PyTuple_GET_SIZE(x);
+    if (PyList_GET_SIZE(y) == size) {
+      for (Py_ssize_t i = 0; i < size; ++i) {
+        if (PyTuple_GET_ITEM(x, i) != PyList_GET_ITEM(y, i)) {
+          return PySequence_Tuple(y);
+        }
       }
+      return Py_NewRef(x);
     }
-
-    Ref<> result = Ref<>::steal(PyTuple_New(3));
-    if (result == nullptr) {
-      return nullptr;
-    }
-    for (Py_ssize_t i = 0; i < 3; i++) {
-      PyObject* item =
-          PyFloat_FromDouble(left_values[i] + scale_value * right_values[i]);
-      if (item == nullptr) {
-        return nullptr;
-      }
-      PyTuple_SET_ITEM(result.get(), i, item);
-    }
-    return result.release();
   }
 
-generic_fallback:
-  Ref<> result = Ref<>::steal(PyTuple_New(3));
-  if (result == nullptr) {
+  Ref<> iter_x = Ref<>::steal(PyObject_GetIter(x));
+  if (iter_x == nullptr) {
     return nullptr;
   }
-  for (Py_ssize_t i = 0; i < 3; i++) {
-    Ref<> index = Ref<>::steal(PyLong_FromSsize_t(i));
-    if (index == nullptr) {
-      return nullptr;
-    }
-    Ref<> left_item = Ref<>::steal(PyObject_GetItem(left, index));
-    if (left_item == nullptr) {
-      return nullptr;
-    }
-    Ref<> right_item = Ref<>::steal(PyObject_GetItem(right, index));
-    if (right_item == nullptr) {
-      return nullptr;
-    }
-    Ref<> scaled = Ref<>::steal(PyNumber_Multiply(scale, right_item));
-    if (scaled == nullptr) {
-      return nullptr;
-    }
-    Ref<> summed = Ref<>::steal(PyNumber_Add(left_item, scaled));
-    if (summed == nullptr) {
-      return nullptr;
-    }
-    PyTuple_SET_ITEM(result.get(), i, summed.release());
-  }
-  return result.release();
-}
-
-PyObject* JITRT_ComprehensionsIsBigSpinnyHelper(
-    PyObject* widget,
-    PyObject* big_kind) {
-  Ref<> kind = Ref<>::steal(PyObject_GetAttrString(widget, "kind"));
-  if (kind == nullptr) {
-    return nullptr;
-  }
-  if (kind.get() != big_kind) {
-    Py_RETURN_FALSE;
-  }
-
-  Ref<> has_spinner = Ref<>::steal(PyObject_GetAttrString(widget, "has_spinner"));
-  if (has_spinner == nullptr) {
-    return nullptr;
-  }
-  if (has_spinner == Py_True) {
-    Py_RETURN_TRUE;
-  }
-  if (has_spinner == Py_False) {
-    Py_RETURN_FALSE;
-  }
-
-  int truth = PyObject_IsTrue(has_spinner);
-  if (truth < 0) {
-    return nullptr;
-  }
-  if (truth) {
-    Py_RETURN_TRUE;
-  }
-  Py_RETURN_FALSE;
-}
-
-PyObject* JITRT_ComprehensionsAnyKnobbyHelper(PyObject* widgets) {
-  Ref<> iter = Ref<>::steal(PyObject_GetIter(widgets));
-  if (iter == nullptr) {
+  Ref<> iter_y = Ref<>::steal(PyObject_GetIter(y));
+  if (iter_y == nullptr) {
     return nullptr;
   }
 
   while (true) {
-    Ref<> item = Ref<>::steal(PyIter_Next(iter));
-    if (item == nullptr) {
+    Ref<> item_x = Ref<>::steal(PyIter_Next(iter_x));
+    if (item_x == nullptr) {
       if (PyErr_Occurred()) {
         return nullptr;
       }
-      Py_RETURN_FALSE;
-    }
-    if (item == Py_None) {
-      continue;
+      return Py_NewRef(x);
     }
 
-    int item_truth = PyObject_IsTrue(item);
-    if (item_truth < 0) {
-      return nullptr;
-    }
-    if (!item_truth) {
-      continue;
-    }
-
-    Ref<> has_knob = Ref<>::steal(PyObject_GetAttrString(item, "has_knob"));
-    if (has_knob == nullptr) {
-      return nullptr;
-    }
-    if (has_knob == Py_True) {
-      Py_RETURN_TRUE;
-    }
-    if (has_knob == Py_False) {
-      continue;
+    Ref<> item_y = Ref<>::steal(PyIter_Next(iter_y));
+    if (item_y == nullptr) {
+      if (PyErr_Occurred()) {
+        return nullptr;
+      }
+      return Py_NewRef(x);
     }
 
-    int knob_truth = PyObject_IsTrue(has_knob);
-    if (knob_truth < 0) {
-      return nullptr;
-    }
-    if (knob_truth) {
-      Py_RETURN_TRUE;
+    if (item_x != item_y) {
+      return PySequence_Tuple(y);
     }
   }
 }
 
-PyObject* JITRT_ComprehensionsDictGetHelper(PyObject* dict, PyObject* key) {
-  if (PyDict_CheckExact(dict)) {
-    PyObject* value = PyDict_GetItemWithError(dict, key);
-    if (value != nullptr) {
-      return Py_NewRef(value);
-    }
-    if (PyErr_Occurred()) {
-      return nullptr;
-    }
-    Py_RETURN_NONE;
-  }
-
-  Ref<> name = Ref<>::steal(PyUnicode_FromString("get"));
-  if (name == nullptr) {
-    return nullptr;
-  }
-  return PyObject_CallMethodObjArgs(dict, name, key, nullptr);
-}
-
-namespace {
-
-PyObject* mdpSortedSuccessorItems(PyObject* dist) {
-  Ref<> items = Ref<>::steal(PyMapping_Items(dist));
-  if (items == nullptr) {
-    return nullptr;
-  }
-
-  if (!PyList_CheckExact(items)) {
-    return PySequence_List(items);
-  }
-
-  Py_ssize_t size = PyList_GET_SIZE(items);
-  Ref<> decorated = Ref<>::steal(PyList_New(size));
-  if (decorated == nullptr) {
-    return nullptr;
-  }
-
-  for (Py_ssize_t i = 0; i < size; i++) {
-    PyObject* item = PyList_GET_ITEM(items.get(), i);
-    if (!PyTuple_CheckExact(item) || PyTuple_GET_SIZE(item) != 2) {
-      PyErr_SetString(PyExc_TypeError, "expected (state, prob) tuple");
-      return nullptr;
-    }
-
-    PyObject* state = PyTuple_GET_ITEM(item, 0);
-    PyObject* prob = PyTuple_GET_ITEM(item, 1);
-    Ref<> neg_prob = Ref<>::steal(PyNumber_Negative(prob));
-    if (neg_prob == nullptr) {
-      return nullptr;
-    }
-    Ref<> decorated_item =
-        Ref<>::steal(PyTuple_Pack(3, neg_prob.get(), state, item));
-    if (decorated_item == nullptr) {
-      return nullptr;
-    }
-    PyList_SET_ITEM(decorated.get(), i, decorated_item.release());
-  }
-
-  if (PyList_Sort(decorated) < 0) {
-    return nullptr;
-  }
-
-  Ref<> result = Ref<>::steal(PyList_New(size));
-  if (result == nullptr) {
-    return nullptr;
-  }
-
-  for (Py_ssize_t i = 0; i < size; i++) {
-    PyObject* decorated_item = PyList_GET_ITEM(decorated.get(), i);
-    PyObject* item = PyTuple_GET_ITEM(decorated_item, 2);
-    Py_INCREF(item);
-    PyList_SET_ITEM(result.get(), i, item);
-  }
-
-  return result.release();
-}
-
-} // namespace
-PyObject* JITRT_ComprehensionsListSortHelper(PyObject* list_obj) {
-  if (PyList_CheckExact(list_obj)) {
-    if (PyList_Sort(list_obj) < 0) {
-      return nullptr;
-    }
-    Py_RETURN_NONE;
-  }
-
-  Ref<> name = Ref<>::steal(PyUnicode_FromString("sort"));
-  if (name == nullptr) {
-    return nullptr;
-  }
-  return PyObject_CallMethodObjArgs(list_obj, name, nullptr);
-}
-
-namespace {
-
-} // namespace
+#endif
 
 PyObject* JITRT_LoadFunctionIndirect(PyObject** func, PyObject* descr) {
   PyObject* res = *func;
@@ -1348,6 +1170,15 @@ PyObject* JITRT_Call(
   }
 
   PyThreadState* tstate = _PyThreadState_GET();
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
   PyObject* res =
       _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
 #if PY_VERSION_HEX >= 0x030C0000
@@ -1362,18 +1193,91 @@ PyObject* JITRT_Call(
   return res;
 }
 
+PyObject* JITRT_CallMethod(
+    PyObject* callable,
+    PyObject* const* args,
+    size_t nargsf,
+    PyObject* kwnames) {
+  JIT_DCHECK(
+      (nargsf & PY_VECTORCALL_ARGUMENTS_OFFSET),
+      "JITRT_CallMethod must always be called as a vectorcall");
+
+  // CallMethod always passes self-or-null in args[0].
+  if constexpr (PY_VERSION_HEX >= 0x030E0000) {
+    if (args[0] == nullptr) {
+      args += 1;
+      nargsf -= 1;
+    }
+  }
+
+  PyThreadState* tstate = _PyThreadState_GET();
+
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
+  PyObject* res =
+      _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
+#if PY_VERSION_HEX >= 0x030C0000
+  if (handle_periodic_activities_on_call(tstate, res, callable)) {
+    Py_DECREF(res);
+    return nullptr;
+  }
+#endif
+  return res;
+}
+
 PyObject* JITRT_Vectorcall(
     PyObject* callable,
     PyObject* const* args,
     size_t nargsf,
     PyObject* kwnames) {
   PyThreadState* tstate = _PyThreadState_GET();
+  if (PyFunction_Check(callable)) {
+    auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+    return func->vectorcall(
+        callable,
+        const_cast<PyObject**>(args),
+        nargsf,
+        kwnames);
+  }
+
   PyObject* res =
       _PyObject_VectorcallTstate(tstate, callable, args, nargsf, kwnames);
 #if PY_VERSION_HEX >= 0x030C0000
   // In 3.12 calls to non-Python functions will check for the eval breaker
   // We handle that here rather than bloat every function call w/ an extra
   // check.
+  if (handle_periodic_activities_on_call(tstate, res, callable)) {
+    Py_DECREF(res);
+    return nullptr;
+  }
+#endif
+  return res;
+}
+
+PyObject* JITRT_CallMethodDescrFast1(
+    PyObject* callable,
+    PyObject* self,
+    PyObject* arg0) {
+  JIT_DCHECK(
+      Py_IS_TYPE(callable, &PyMethodDescr_Type),
+      "expected method descriptor");
+  auto* method = reinterpret_cast<PyMethodDescrObject*>(callable);
+  JIT_DCHECK(
+      method->d_method->ml_flags == METH_FASTCALL,
+      "expected METH_FASTCALL descriptor");
+
+  PyObject* args[1] = {arg0};
+  auto cfunc = _PyCFunctionFast_CAST(method->d_method->ml_meth);
+  PyObject* res = cfunc(self, args, /*nargs=*/1);
+#if PY_VERSION_HEX >= 0x030C0000
+  PyThreadState* tstate = _PyThreadState_GET();
   if (handle_periodic_activities_on_call(tstate, res, callable)) {
     Py_DECREF(res);
     return nullptr;
