@@ -13,34 +13,30 @@
 - 已新增 `scripts/diagnostics/debug_hir_env.py`，统一生成本地 Debug venv 和 `mdp` HIR 抓取命令
 - 已完成第一轮本地近似基线与热点白名单归因
 - 已完成 ARM Docker 第一轮正式对照，并验证 `stock CPython 3.14.0 @ ebf955df7a8 + JIT` 构建链路
-- 已完成前三轮正式优化与后续负优化实验复盘
+- 已完成前三轮正式优化与第四轮负优化实验复盘
 
 当前尚未完成：
 
 - 下一轮优化点的系统性挖掘与正式复核
-- `Battle.evaluate` steady-state 主循环的下一轮可落地切入点
+- `Battle.getSuccessors` 命中路径与 miss 路径的进一步拆分优化
 
-当前前三轮与后续实验的结论已经明确：
+当前前三轮与第四轮的结论已经明确：
 
 - HIR 形状改善：`BinaryOp 6 -> 4`，`GuardType 5 -> 3`
 - 热点白名单本地近似：相对前两轮仅约 `0.25%` 边际改善
 - `Battle.getSuccessors` 的中期整函数 helper 路径已经作为实验实现过
-- `Battle.getSuccessors` 的后续 cached miss helper 路径也已经作为实验实现过
-- 这两条 `getSuccessors` 路线都在真实环境里从 `1.04s` 回退到 `1.05s`
-- `Battle.evaluate` 的聚合 helper 路径已完成模式匹配验证，但未能消除旧的 `MakeFunction + CallMethod(<genexpr>)` 链，已在提交前回退
+- 该实验在本地近似与容器口径下出现过正向信号，但真实环境结果从第三轮 `1.04s` 回退到第四轮 `1.05s`
 
 结论：
 
 - 第三轮更像“结构上更合理，但性能收益不大”的实验
-- `Battle.getSuccessors` 的异常控制流热点确实值得打，但当前 whole-helper 与 cached miss helper 两条方案都会把命中路径拖重，不能纳入正式收益线
-- `Battle.evaluate` 的聚合 helper 路线说明外层 `sum/max` 级别的晚期替换太晚，后续若继续应改为更早覆盖整段生成器链
+- 第四轮说明 `Battle.getSuccessors` 的异常控制流热点确实值得打，但当前 whole-helper 方案会把命中路径拖重，不能纳入正式收益线
 
 围绕 `Battle.getSuccessors`，目前已经额外确认了一条短期路径与一条中期路径：
 
 - 短期路径：把 `self.successors[statep]` 的 miss 改写为窄 helper，并保持 `KeyError` 语义不变
 - 结果：HIR 能从 `BinaryOp<Subscript>` 改成 `CallStatic + CheckExc`，但 `UnhandledException` deopt 计数基本不变，只是从 `BinaryOp` 转移到 `CheckExc`
 - 中期路径：通过 `Battle.getSuccessors` 的整函数 helper 直接绕开 `KeyError` 控制流，虽然能把 `BinaryOp<Subscript>` 改成 `CallStatic + CheckExc` 并消除该函数的头部 deopt，但真实环境回退，当前已从主收益线回退
-- 后续窄路径：`Battle.getSuccessors cached miss helper` 能进一步清掉 `UnhandledException` deopt，但真实环境同样轻微回退，当前也已从主收益线回退
 
 ## 2. 环境与口径
 
@@ -90,15 +86,14 @@ docker exec cpython-baseline-test sh -lc 'BENCHMARK=mdp SAMPLES=5 WARMUP=1 /scri
 - 真实环境基线：`stock CPython 3.14.0 + JIT = 1.04s`
 - 真实环境第三轮优化 commit：`1.04s`
 - 真实环境第四轮优化 commit：`1.05s`
-- 真实环境第五轮 `getSuccessors cached miss helper` commit：`1.05s`
 - 结论上，前三轮已经把 `CinderX JIT` 拉到与 `stock CPython JIT` 持平
-- 第四轮 whole-helper 与第五轮 cached miss helper 都没有延续本地/容器里的正向结果，反而都出现了约 `0.96%` 的轻微回退
+- 第四轮 whole-helper 方案在真实环境中没有延续本地/容器里的正向结果，反而约有 `0.96%` 的回退
 
 结论：
 
 - 真实环境的优先级高于本地近似和容器结果，因此正式收益线当前只计入前三轮
 - `applyHPChange`、`getCritDist` 与 `Battle.getSuccessors` 的异常控制流都属于真实主差距来源
-- 但 `Battle.getSuccessors` 的 whole-helper 与 cached miss helper 方案都需要视为负优化实验，而不是正式收益点
+- 但 `Battle.getSuccessors` 的当前 whole-helper 方案需要视为负优化实验，而不是正式收益点
 
 ### 3.3 关于容器中“optimized”一栏的说明
 
@@ -113,23 +108,6 @@ docker exec cpython-baseline-test sh -lc 'BENCHMARK=mdp SAMPLES=5 WARMUP=1 /scri
 - 第四轮 whole-helper 曾经接入过容器的 `optimized` 路径，并在该口径下表现为正向
 - 但真实环境结果已经证明这条路径不能计入正式收益
 - 因此主线容器脚本也已回退到只包含前三轮开关
-
-### 3.4 已回退实验记录
-
-为了避免后续重复踩坑，这里统一记录已经做过且已从主线回退的实验：
-
-- `Battle.getSuccessors whole-helper`
-  - 现象：本地近似和容器里出现过正向信号
-  - 真实环境：`1.04s -> 1.05s`
-  - 结论：命中路径固定成本偏重，已回退
-- `Battle.getSuccessors cached miss helper`
-  - 现象：可将该函数的 `UnhandledException` deopt 降到 `0`
-  - 真实环境：`1.04s -> 1.05s`
-  - 结论：去 deopt 不等于总时间收益，已回退
-- `Battle.evaluate` aggregation helpers
-  - 现象：模式匹配已命中 4 处固定聚合链，并能在 HIR 中新增 `CallStatic + CheckExc`
-  - 问题：旧的 `MakeFunction + CallMethod(<genexpr>)` 链并未被消掉
-  - 结论：当前替换位置过晚，未形成有效简化，已在提交前回退
 
 ## 4. 本地近似基线
 
@@ -428,7 +406,6 @@ fun bm_mdp:getCritDist {
 - 第二轮：`docs/superpowers/mdp/reports/2026-03-19-mdp-getcritdist-optimization-report.md`
 - 第三轮：`docs/superpowers/mdp/reports/2026-03-19-mdp-getsuccessorsb-optimization-report.md`
 - 第四轮 `Battle.getSuccessors` whole-helper 路径已降级为负优化实验，结论保留在本报告中，不再作为主线独立收益报告维护
-- 第五轮 `Battle.getSuccessors cached miss helper` 与后续 `Battle.evaluate aggregation helper` 也只保留在本报告中，不单独维护收益报告
 
 ## 10. 当前优先级排序
 
@@ -480,6 +457,6 @@ fun bm_mdp:getCritDist {
 
 1. 保留 `applyHPChange` 与 `getCritDist` 这两条已验证正式收益主线，并将第三轮 `_getSuccessorsB` 保持为次优先低收益项
 2. 将 `_getSuccessorsB` 的第三轮实验保留为“局部形状变轻但总收益较小”的次优先项
-3. 将 `Battle.getSuccessors` 的短期 helper 路径定性为“形状改善但不足以转化为真实收益”，避免继续在同一路线上投入
-4. 将 `Battle.getSuccessors` 的 whole-helper 与 cached miss helper 都明确定性为“真实环境负优化”，主线保持回退
-5. 将 `Battle.evaluate` 的聚合 helper 路径定性为“匹配成功但替换过晚”，后续若继续应更早覆盖生成器链，而不是只替换外层 `sum/max`
+3. 将 `Battle.getSuccessors` 的短期 helper 路径定性为“形状改善但不足以消除 deopt”，避免继续在同一路线上投入
+4. 将第四轮 `Battle.getSuccessors` whole-helper 明确定性为“真实环境负优化”，主线保持回退，只在实验线继续深挖
+5. 围绕 `Battle.getSuccessors` 重新设计只优化 miss 路径、尽量不增加 hit 固定成本的新方案，例如更细粒度的 `KeyError` lowering 或更窄的 miss helper
