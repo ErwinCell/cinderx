@@ -8,12 +8,18 @@ import unittest
 
 import cinderx.jit
 
+from ._pyperformance_helper import find_pyperformance_benchmark
+
 
 @unittest.skipUnless(cinderx.jit.is_enabled(), "Tests functionality on cinderjit")
 class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
     def test_priority_compare_add_reduces_generic_binary_ops(self) -> None:
+        module_path = find_pyperformance_benchmark("bm_mdp")
+        if module_path is None:
+            self.skipTest("bm_mdp benchmark source unavailable")
+
         code = textwrap.dedent(
-            """
+            f"""
             import importlib.util
             import json
 
@@ -22,7 +28,7 @@ class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
 
             spec = importlib.util.spec_from_file_location(
                 "bm_mdp",
-                "/Users/luchen/Repo/pyperformance/pyperformance/data-files/benchmarks/bm_mdp/run_benchmark.py",
+                {str(module_path)!r},
             )
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -48,7 +54,7 @@ class MdpGetSuccessorsBExperimentTests(unittest.TestCase):
             jit.enable_specialized_opcodes()
             jit.compile_after_n_calls(1000000)
 
-            summaries = {}
+            summaries = {{}}
             for action in ("Dig", "Super Potion"):
                 statep = (1, (charhalf, starhalf, 0), action)
                 battle = mod.Battle()

@@ -7,12 +7,18 @@ import unittest
 
 import cinderx.jit
 
+from ._pyperformance_helper import find_pyperformance_benchmark
+
 
 @unittest.skipUnless(cinderx.jit.is_enabled(), "Tests functionality on cinderjit")
 class MdpApplyHpChangeExperimentTests(unittest.TestCase):
     def test_apply_hp_change_prefers_int_clamp_path(self) -> None:
+        module_path = find_pyperformance_benchmark("bm_mdp")
+        if module_path is None:
+            self.skipTest("bm_mdp benchmark source unavailable")
+
         code = textwrap.dedent(
-            """
+            f"""
             import importlib.util
             import json
 
@@ -21,7 +27,7 @@ class MdpApplyHpChangeExperimentTests(unittest.TestCase):
 
             spec = importlib.util.spec_from_file_location(
                 "bm_mdp",
-                "/Users/luchen/Repo/pyperformance/pyperformance/data-files/benchmarks/bm_mdp/run_benchmark.py",
+                {str(module_path)!r},
             )
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
