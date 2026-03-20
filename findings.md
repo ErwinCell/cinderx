@@ -3944,6 +3944,7 @@ Conclusion:
   worker-startup verification problem (`jit was not enabled in the worker`)
   after the targeted tests and benchmark commands have already completed.
 
+<<<<<<< HEAD
 ## 2026-03-19 Issue 48: tomli_loads handled-subscript deopt loop
 
 ### Scope
@@ -4076,3 +4077,12 @@ Conclusion:
   - the fix is functionally revalidated after migration back from the clean
     worktree
   - the narrow single-sample benchmark effect remains small and noisy
+
+### Latest Head Check
+
+- On the latest remote branch head `e37d4cd1`:
+  - clean ARM wheel build succeeded
+  - the three issue49 targeted runtime regressions still passed:
+    - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`
+    - `test_polymorphic_method_load_avoids_method_with_values_deopts`
+    - `test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts`
