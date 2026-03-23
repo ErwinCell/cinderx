@@ -1042,6 +1042,161 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 30000, proc.stdout)
 
+    def test_attr_derived_monomorphic_method_load_restores_inlining(self) -> None:
+        if sys.version_info < (3, 14):
+            self.skipTest("requires Python 3.14 LOAD_ATTR_METHOD_WITH_VALUES")
+
+        # Regression guard:
+        # attr-derived receivers such as self.reference.find(update) may be
+        # runtime-monomorphic even when their HIR type is only Object. Those
+        # receivers should still be able to recover the method-with-values fast
+        # path and expose a VectorCall that the HIR inliner can see.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_hir_inliner()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Square:
+                def __init__(self, reference=None, value=0):
+                    self.reference = reference
+                    self.value = value
+
+                def find(self, update):
+                    if self.reference is None:
+                        return self.value + update
+                    return self.reference.find(update) + self.value + update
+
+            root = Square(None, 1)
+            mid = Square(root, 2)
+            outer = Square(mid, 3)
+
+            for _ in range(20000):
+                outer.find(1)
+
+            assert jit.force_compile(Square.find)
+            counts = cinderjit.get_function_hir_opcode_counts(Square.find)
+            stats = jit.get_inlined_functions_stats(Square.find)
+            print(counts.get("CallMethod", 0))
+            print(counts.get("VectorCall", 0))
+            print(stats.get("num_inlined_functions", 0))
+            print(outer.find(1))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/attr_derived_monomorphic_method_load.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 4, proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(int(lines[-1]), 9, proc.stdout)
+
+    def test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts(
+        self,
+    ) -> None:
+        if sys.version_info < (3, 14):
+            self.skipTest("requires Python 3.14 LOAD_ATTR_METHOD_WITH_VALUES")
+
+        # Regression guard:
+        # attr-derived receivers should not be reopened so broadly that a
+        # polymorphic field like self.reference reintroduces the old
+        # method-with-values deopt storm.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class FirstLeaf:
+                def execute(self):
+                    return 1
+
+            class SecondLeaf:
+                def execute(self):
+                    return 2
+
+            class Holder:
+                def __init__(self, reference):
+                    self.reference = reference
+
+                def run(self):
+                    return self.reference.execute()
+
+            holder = Holder(FirstLeaf())
+            for _ in range(20000):
+                holder.run()
+
+            assert jit.force_compile(Holder.run)
+            counts = cinderjit.get_function_hir_opcode_counts(Holder.run)
+
+            jit.get_and_clear_runtime_stats()
+            total = 0
+            for i in range(20000):
+                holder.reference = FirstLeaf() if (i & 1) == 0 else SecondLeaf()
+                total += holder.run()
+
+            stats = jit.get_and_clear_runtime_stats()
+            relevant = [
+                entry
+                for entry in stats["deopt"]
+                if entry["normal"]["func_qualname"] == "Holder.run"
+                and entry["normal"]["description"] == "LOAD_ATTR_METHOD_WITH_VALUES"
+            ]
+
+            print(counts.get("LoadMethod", 0))
+            print(counts.get("LoadMethodCached", 0))
+            print(len(relevant))
+            print(sum(entry["int"]["count"] for entry in relevant))
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/attr_derived_polymorphic_method_load.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]) + int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 30000, proc.stdout)
+
     def test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts(
         self,
     ) -> None:

@@ -1370,6 +1370,7 @@ void HIRBuilder::translate(
     BytecodeInstruction prev_bc_instr{code_, BCOffset{-2}};
     for (auto bc_it = bc_block.begin(); bc_it != bc_block.end(); ++bc_it) {
       BytecodeInstruction bc_instr = *bc_it;
+      auto opcode = bc_instr.opcode();
 
       tc.frame.cur_instr_offs = bc_instr.baseOffset();
       Instr* prev_hir_instr = tc.block->GetTerminator();
@@ -1397,7 +1398,6 @@ void HIRBuilder::translate(
       }
       prev_bc_instr = bc_instr;
       // Translate instruction
-      auto opcode = bc_instr.opcode();
       switch (opcode) {
         case NOP:
         case NOT_TAKEN: {
@@ -2512,6 +2512,10 @@ void HIRBuilder::emitAnyCall(
   auto flags = is_awaited ? CallFlags::Awaited : CallFlags::None;
   bool call_used_is_awaited = true;
 
+  if (tryEmitProfiledMethodWithValuesCall(cfg, tc, bc_instr, flags)) {
+    return;
+  }
+
   auto opcode = bc_instr.opcode();
   switch (opcode) {
     case CALL_FUNCTION:
@@ -2647,6 +2651,212 @@ generic_call:
 
     tc.block = post_await_block.block;
   }
+}
+
+bool HIRBuilder::tryEmitProfiledMethodWithValuesCall(
+    CFG& cfg,
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr,
+    CallFlags flags) {
+  if (!pending_method_with_values_call_.has_value()) {
+    return false;
+  }
+  if (kwnames_ != nullptr) {
+    JIT_DLOG("profiled-mwv call skipped: kwnames present");
+    return false;
+  }
+  if (bc_instr.opcode() != CALL && bc_instr.opcode() != CALL_METHOD) {
+    JIT_DLOG("profiled-mwv call skipped: opcode {}", bc_instr.opcode());
+    return false;
+  }
+
+  const PendingMethodWithValuesCall pending = *pending_method_with_values_call_;
+  std::size_t num_operands = static_cast<std::size_t>(bc_instr.oparg()) + 2;
+  if (tc.frame.stack.size() < num_operands) {
+    JIT_DLOG(
+        "profiled-mwv call skipped: stack too small {} < {}",
+        tc.frame.stack.size(),
+        num_operands);
+    pending_method_with_values_call_.reset();
+    return false;
+  }
+  Register* callable_reg = tc.frame.stack.peek(num_operands);
+  if (!callable_reg->instr()->IsLoadMethod()) {
+    JIT_DLOG(
+        "profiled-mwv call skipped: callable is {}",
+        callable_reg->instr()->opname());
+    pending_method_with_values_call_.reset();
+    return false;
+  }
+
+  auto emit_generic_call = [&](TranslationContext& call_tc) {
+    call_tc.emitSnapshot();
+    Register* call_out = temps_.AllocateStack();
+    auto call = call_tc.emit<CallMethod>(num_operands, call_out, flags);
+    for (auto i = num_operands; i > 0; i--) {
+      Register* arg = call_tc.frame.stack.pop();
+      call->SetOperand(i - 1, arg);
+    }
+    call->setFrameState(call_tc.frame);
+    call_tc.frame.stack.push(call_out);
+    return call_out;
+  };
+
+  auto emit_fast_call = [&](TranslationContext& call_tc) {
+    call_tc.emitSnapshot();
+    std::vector<Register*> arg_regs(num_operands - 1, nullptr);
+    for (auto i = num_operands - 1; i > 1; i--) {
+      arg_regs[i - 1] = call_tc.frame.stack.pop();
+    }
+    Register* self = call_tc.frame.stack.pop();
+    call_tc.frame.stack.pop(); // discard generic callable from LoadMethod
+
+    Register* funcreg = temps_.AllocateStack();
+    call_tc.emit<LoadConst>(funcreg, Type::fromObject(pending.descr));
+
+    Register* call_out = temps_.AllocateStack();
+    auto vector_call = call_tc.emit<VectorCall>(num_operands, call_out, flags);
+    vector_call->SetOperand(0, funcreg);
+    vector_call->SetOperand(1, self);
+    for (std::size_t i = 2; i < num_operands; i++) {
+      vector_call->SetOperand(i, arg_regs[i - 1]);
+    }
+    vector_call->setFrameState(call_tc.frame);
+    call_tc.frame.stack.push(call_out);
+    return call_out;
+  };
+
+  auto emit_type_version_branch =
+      [&](TranslationContext& branch_tc,
+          BasicBlock* success,
+          BasicBlock* failure) -> Register* {
+    Register* obj_type = temps_.AllocateStack();
+    branch_tc.emit<LoadField>(
+        obj_type, pending.receiver, "ob_type", offsetof(PyObject, ob_type), TType);
+
+    Register* version = temps_.AllocateStack();
+    branch_tc.emit<LoadField>(
+        version,
+        obj_type,
+        "tp_version_tag",
+        offsetof(PyTypeObject, tp_version_tag),
+        TCUInt32);
+
+    Register* expected = temps_.AllocateStack();
+    branch_tc.emit<LoadConst>(
+        expected, Type::fromCUInt(pending.type_version, TCUInt32));
+
+    Register* matches = temps_.AllocateStack();
+    branch_tc.emit<PrimitiveCompare>(
+        matches, PrimitiveCompareOp::kEqual, version, expected);
+    branch_tc.emit<CondBranch>(matches, success, failure);
+    return obj_type;
+  };
+
+  auto emit_inline_values_valid_branch =
+      [&](TranslationContext& branch_tc,
+          Register* obj_type,
+          BasicBlock* success,
+          BasicBlock* failure) {
+    Register* basicsize = temps_.AllocateStack();
+    branch_tc.emit<LoadField>(
+        basicsize,
+        obj_type,
+        "tp_basicsize",
+        offsetof(PyTypeObject, tp_basicsize),
+        TCInt64);
+
+    Register* valid_extra = temps_.AllocateStack();
+    branch_tc.emit<LoadConst>(
+        valid_extra, Type::fromCInt(offsetof(PyDictValues, valid), TCInt64));
+
+    Register* valid_offset = temps_.AllocateStack();
+    branch_tc.emit<IntBinaryOp>(
+        valid_offset, BinaryOpKind::kAdd, basicsize, valid_extra);
+
+    Register* valid_addr = temps_.AllocateStack();
+    branch_tc.emit<LoadFieldAddress>(valid_addr, pending.receiver, valid_offset);
+
+    Register* zero_idx = temps_.AllocateStack();
+    branch_tc.emit<LoadConst>(zero_idx, Type::fromCInt(0, TCInt64));
+
+    Register* valid = temps_.AllocateStack();
+    branch_tc.emit<LoadArrayItem>(
+        valid, valid_addr, zero_idx, pending.receiver, 0, TCUInt8);
+
+    Register* zero = temps_.AllocateStack();
+    branch_tc.emit<LoadConst>(zero, Type::fromCUInt(0, TCUInt8));
+
+    Register* valid_nonzero = temps_.AllocateStack();
+    branch_tc.emit<PrimitiveCompare>(
+        valid_nonzero, PrimitiveCompareOp::kNotEqual, valid, zero);
+    branch_tc.emit<CondBranch>(valid_nonzero, success, failure);
+  };
+
+  auto emit_heap_keys_version_branch =
+      [&](TranslationContext& branch_tc,
+          Register* obj_type,
+          BasicBlock* success,
+          BasicBlock* failure) {
+    Register* keys = temps_.AllocateStack();
+    branch_tc.emit<LoadField>(
+        keys,
+        obj_type,
+        "ht_cached_keys",
+        offsetof(PyHeapTypeObject, ht_cached_keys),
+        TCPtr);
+
+    Register* version = temps_.AllocateStack();
+    branch_tc.emit<LoadField>(
+        version,
+        keys,
+        "dk_version",
+        offsetof(PyDictKeysObject, dk_version),
+        TCUInt32);
+
+    Register* expected = temps_.AllocateStack();
+    branch_tc.emit<LoadConst>(
+        expected, Type::fromCUInt(pending.keys_version, TCUInt32));
+
+    Register* matches = temps_.AllocateStack();
+    branch_tc.emit<PrimitiveCompare>(
+        matches, PrimitiveCompareOp::kEqual, version, expected);
+    branch_tc.emit<CondBranch>(matches, success, failure);
+  };
+
+  TranslationContext values_check{cfg.AllocateBlock(), tc.frame};
+  TranslationContext keys_check{cfg.AllocateBlock(), tc.frame};
+  TranslationContext fast_path{cfg.AllocateBlock(), tc.frame};
+  TranslationContext fallback_path{cfg.AllocateBlock(), tc.frame};
+  TranslationContext done{cfg.AllocateBlock(), tc.frame};
+
+  Register* common_out = temps_.AllocateStack();
+  Register* obj_type = emit_type_version_branch(
+      tc, values_check.block, fallback_path.block);
+
+  emit_inline_values_valid_branch(
+      values_check, obj_type, keys_check.block, fallback_path.block);
+  emit_heap_keys_version_branch(
+      keys_check, obj_type, fast_path.block, fallback_path.block);
+
+  Register* fast_out = emit_fast_call(fast_path);
+  fast_path.emit<Assign>(common_out, fast_out);
+  fast_path.emit<Branch>(done.block);
+
+  Register* slow_out = emit_generic_call(fallback_path);
+  fallback_path.emit<Assign>(common_out, slow_out);
+  fallback_path.emit<Branch>(done.block);
+
+  for (std::size_t i = 0; i < num_operands; i++) {
+    done.frame.stack.pop();
+  }
+  done.frame.stack.push(common_out);
+
+  pending_method_with_values_call_.reset();
+  JIT_DLOG("profiled-mwv call emitted for instr {}", bc_instr.baseOffset().value());
+  tc.block = done.block;
+  tc.frame = done.frame;
+  return true;
 }
 
 Register* HIRBuilder::findFunctionClosure(BasicBlock* block, Register* func) {
@@ -4028,14 +4238,20 @@ void HIRBuilder::emitLoadAttr(
         if (descr == nullptr) {
           break;
         }
-        // This lowering turns the method load into a constant descriptor plus
-        // the receiver, so keep it on receivers whose exact runtime type is
-        // already stable in HIR. Polymorphic args and loop locals should stay
-        // on LoadMethod to preserve the cache-backed fallback path.
         if (!canUseMethodWithValuesFastPath(
                 receiver, descr, code_, preloader_.globals())) {
+          // Only recover the profiled fast path in the outer function body.
+          // Re-emitting the same hybrid branch inside already-inlined callees
+          // creates a nested shape that later HIR passes do not handle well yet.
+          if (tc.frame.parent == nullptr) {
+            pending_method_with_values_call_ = PendingMethodWithValuesCall{
+                receiver, descr, bc_instr.cacheU32(2), bc_instr.cacheU32(4)};
+          } else {
+            pending_method_with_values_call_.reset();
+          }
           break;
         }
+        pending_method_with_values_call_.reset();
         Register* obj_type = emit_type_version_guard(
             bc_instr.cacheU32(2), "LOAD_ATTR_METHOD_WITH_VALUES");
         emit_inline_values_valid_guard(obj_type, "LOAD_ATTR_METHOD_WITH_VALUES");

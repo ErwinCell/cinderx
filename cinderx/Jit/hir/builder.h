@@ -11,6 +11,7 @@
 #include "cinderx/Jit/hir/preload.h"
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -163,6 +164,11 @@ class HIRBuilder {
       TranslationContext& tc,
       jit::BytecodeInstructionBlock::Iterator& bc_it,
       const jit::BytecodeInstructionBlock& bc_instrs);
+  bool tryEmitProfiledMethodWithValuesCall(
+      CFG& cfg,
+      TranslationContext& tc,
+      const jit::BytecodeInstruction& bc_instr,
+      CallFlags flags);
   void emitCallEx(
       TranslationContext& tc,
       const jit::BytecodeInstruction& bc_instr,
@@ -598,6 +604,13 @@ class HIRBuilder {
   BlockMap block_map_;
   const Preloader& preloader_;
 
+  struct PendingMethodWithValuesCall {
+    Register* receiver{nullptr};
+    PyObject* descr{nullptr};
+    uint32_t type_version{0};
+    uint32_t keys_version{0};
+  };
+
   TempAllocator temps_{nullptr};
 
   // Tracks the function for compilations that require it.
@@ -613,6 +626,7 @@ class HIRBuilder {
   Register* inline_genexpr_closure_{nullptr};
   BasicBlock* inline_genexpr_exit_{nullptr};
   std::vector<std::unique_ptr<FrameState>> inline_genexpr_parent_frames_;
+  std::optional<PendingMethodWithValuesCall> pending_method_with_values_call_;
   bool stop_block_translation_{false};
 };
 
