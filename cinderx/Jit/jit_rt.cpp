@@ -1304,6 +1304,20 @@ PyObject* JITRT_Vectorcall(
   return res;
 }
 
+PyObject* JITRT_VectorcallExactPyFunc(
+    PyObject* callable,
+    PyObject* const* args,
+    size_t nargsf,
+    PyObject* kwnames) {
+  JIT_DCHECK(
+      Py_TYPE(callable) == &PyFunction_Type,
+      "Expected exact PyFunctionObject, got {}",
+      Py_TYPE(callable)->tp_name);
+  auto* func = reinterpret_cast<PyFunctionObject*>(callable);
+  return func->vectorcall(
+      callable, const_cast<PyObject**>(args), nargsf, kwnames);
+}
+
 PyObject* JITRT_CallMethodDescrFast1(
     PyObject* callable,
     PyObject* self,
