@@ -6,6 +6,91 @@ entrypoint:
 
 `scripts/push_to_arm.ps1` -> `scripts/arm/remote_update_build_test.sh`
 
+### Open case: nqueens residual MakeFunction / issue #61
+
+- Date: `2026-03-24`
+- Branch/worktree:
+  - `bench-cur-7c361dce`
+  - `C:/work/code/frame`
+- Remote workspace:
+  - source: `/root/work/issue61-src`
+  - build: `/root/work/issue61-build`
+- Status:
+  - builder/pass direction changed from dead-code deletion to loop-hoist
+  - iter-edge hoist shape was proven unsafe on ARM
+  - body-split hoist shape now compiles and passes focused runtime regressions
+
+- Root-cause notes:
+  - first hoist attempt copied the closure setup to the outer iter edge too
+    early
+  - ARM backtraces showed two concrete failures:
+    - dangling tuple metadata during
+      `RefcountInsertion::bindGuards() -> DeadCodeElimination::Run()`
+    - invalid liveness / predecessor-state mismatch in
+      `RefcountInsertion::initializeInState()` because setup frame states still
+      referenced body-local values that did not dominate the new setup block
+  - final fix:
+    - split the outer loop body at the original `MakeTuple` point
+    - keep the original body prefix in place
+    - branch there between cached-function reuse and first-iteration setup
+    - join into the remainder block with a phi for the hoisted function object
+
+- ARM verification:
+  - incremental `_cinderx.so` rebuild in `/root/work/issue61-build`: `PASS`
+  - force-compile probe for the hot-loop reproducer: `PASS`
+  - focused runtime regressions: `PASS`
+    - `ArmRuntimeTests.test_set_genexpr_eliminates_generator_call`
+    - `ArmRuntimeTests.test_set_genexpr_with_closure_eliminates_generator_call`
+    - `ArmRuntimeTests.test_set_genexpr_hot_loop_hoists_makefunction_chain`
+    - `ArmRuntimeTests.test_set_genexpr_preserves_exception_behavior`
+    - `ArmRuntimeTests.test_set_genexpr_with_closure_preserves_exception_behavior`
+
+- HIR evidence:
+  - compiled `hot` counts still show exactly one residual closure chain:
+    - `MakeFunction = 1`
+    - `MakeTuple = 1`
+    - `SetFunctionAttr = 1`
+  - the closure setup now sits after the outer-loop prefix and before the
+    inner genexpr iterator loop, so it is no longer rebuilt in the innermost
+    repeated path
+
+- ARM A/B performance snapshot:
+  - method:
+    - same host and same build tree
+    - temporary baseline produced by disabling only
+      `InlineGenexprMakeFunctionHoist` in `compiler.cpp`
+    - all measured functions were `jit.force_compile()`d before timing
+  - hot-loop microbenchmark:
+    - current median: `0.041741000000001804 s`
+    - baseline median: `0.07054826800003866 s`
+    - improvement: about `+40.83%`
+  - direct `list(n_queens(8))` benchmark:
+    - current median: `0.2247215329998653 s`
+    - baseline median: `0.23916533600004186 s`
+    - improvement: about `+6.04%`
+
+- Focused guardrail follow-up:
+  - initial warmup-only direct probes for `comprehensions`, `generators`, and
+    `logging_silent` showed large apparent regressions, but that signal was not
+    stable
+  - pass-dump inspection confirmed `WidgetTray._any_knobby` is unchanged by
+    `InlineGenexprMakeFunctionHoist`
+  - after switching the probes to explicit `jit.force_compile()` before timing,
+    the same A/B pair became effectively flat:
+    - `comprehensions`: `0.01384734400016896 s` vs `0.013889900000322086 s`
+      (`+0.31%`)
+    - `generators`: `0.2022750409996661 s` vs `0.20083337599953666 s`
+      (`-0.72%`)
+    - `logging_silent`: `0.0087713539996912 s` vs `0.008766090000790427 s`
+      (`-0.06%`)
+  - conclusion:
+    - the earlier large slowdowns were measurement noise from compile timing,
+      not a reproducible runtime regression from issue `#61`
+
+- Remaining gap:
+  - broader guardrail benchmark validation is still optional for this round;
+    the focused targeted and A/B evidence is currently positive
+
 ### Open case: deepcopy / issue #47
 
 - Date: `2026-03-18`
