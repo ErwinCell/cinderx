@@ -292,6 +292,11 @@ class HIRBuilder {
       Register* container,
       Register* subscript,
       Register* result);
+  bool tryRewritePickleLoadStopCall(
+      CFG& cfg,
+      TranslationContext& tc,
+      jit::BytecodeInstructionBlock::Iterator& bc_it,
+      const jit::BytecodeInstructionBlock& bc_instrs);
 #endif
   void emitBuildSlice(
       TranslationContext& tc,

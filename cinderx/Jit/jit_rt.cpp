@@ -1011,6 +1011,49 @@ PyObject* JITRT_DeepcopyTuplePostMiss(PyObject* x, PyObject* y) {
   }
 }
 
+PyObject* JITRT_PickleUnpicklerPopStack(PyObject* self) {
+  if (self == nullptr) {
+    PyErr_SetString(
+        PyExc_SystemError, "pickle unpickler helper received null self");
+    return nullptr;
+  }
+
+  Ref<> stack = Ref<>::steal(PyObject_GetAttrString(self, "stack"));
+  if (stack == nullptr) {
+    return nullptr;
+  }
+
+  if (PyList_CheckExact(stack)) {
+    PyObject* stack_obj = stack.get();
+    Py_ssize_t size = PyList_GET_SIZE(stack_obj);
+    if (size <= 0) {
+      PyErr_SetString(PyExc_IndexError, "pop from empty list");
+      return nullptr;
+    }
+    PyObject* item = PyList_GET_ITEM(stack_obj, size - 1);
+    Py_INCREF(item);
+    if (PyList_SetSlice(stack_obj, size - 1, size, nullptr) < 0) {
+      Py_DECREF(item);
+      return nullptr;
+    }
+    return item;
+  }
+
+  Ref<> pop = Ref<>::steal(PyObject_GetAttrString(stack, "pop"));
+  if (pop == nullptr) {
+    return nullptr;
+  }
+
+  return PyObject_CallNoArgs(pop);
+}
+
+int JITRT_PickleIsStopKey(PyObject* key) {
+  if (!PyBytes_CheckExact(key) || PyBytes_GET_SIZE(key) != 1) {
+    return 0;
+  }
+  return PyBytes_AS_STRING(key)[0] == '.';
+}
+
 #endif
 
 PyObject* JITRT_LoadFunctionIndirect(PyObject** func, PyObject* descr) {

@@ -4081,3 +4081,135 @@ Conclusion:
     - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`
     - `test_polymorphic_method_load_avoids_method_with_values_deopts`
     - `test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts`
+
+## 2026-03-23 Issue 64: unpickle `_Stop` control-flow deopt
+
+- Case:
+  - `unpickle_pure_python`
+- Branch/worktree:
+  - `codex/issue64-unpickle-stop`
+  - `C:/work/code/cinderx-issue64-unpickle-stop`
+- Scheduler:
+  - tool:
+    - `C:/work/code/coroutines/cinderx/scripts/remote_scheduler.py`
+  - db:
+    - `C:/work/code/cinderx-issue64-unpickle-stop/plans/remote-scheduler.sqlite3`
+  - ARM lease:
+    - `#1`
+    - released cleanly after the verify round
+- Unified remote entrypoint:
+  - `scripts/arm/remote_update_build_test.sh`
+
+- Current implementation direction:
+  - keep `pickle._Unpickler.load_stop` semantics unchanged for non-JIT callers
+  - in compiled `pickle._Unpickler.load`, recognize the exact stdlib STOP-byte path
+  - lower that path to:
+    - `CallStatic<JITRT_PickleIsStopKey>`
+    - `CallStatic<JITRT_PickleUnpicklerPopStack>`
+    - direct `Return`
+
+- HIR evidence:
+  - remote HIR dump for `pickle:_Unpickler.load` now contains:
+    - `CallStatic<JITRT_PickleIsStopKey(_object*)...>`
+    - `CallStatic<JITRT_PickleUnpicklerPopStack(_object*)...>`
+
+- ARM direct probe:
+  - tracked repro:
+    - `scripts/arm/issue64_pickle_stop_probe.py`
+  - base output:
+    - `_Unpickler.load_stop` `Raise` deopts: `0`
+    - `_Unpickler.load` `UnhandledException` deopts: `200`
+    - total decoded item count: `400000`
+  - current output:
+    - `_Unpickler.load_stop` `Raise` deopts: `0`
+    - `_Unpickler.load` `UnhandledException` deopts: `0`
+    - total decoded item count: `400000`
+  - direct delta:
+    - `_Unpickler.load`: `200 -> 0`
+  - direct timing:
+    - base median: `6.551813789999983 s`
+    - first current median with generic pop helper: `7.2284890100000325 s`
+    - current median after exact-list fast path: `6.500644837999971 s`
+    - net delta vs base: about `-0.78%`
+
+- Shared-suite blockers observed on the first unified run:
+  - unrelated `test_arm_runtime.py` failures and one segfault in existing branch tests
+  - these were isolated by switching the entrypoint to:
+    - `ARM_RUNTIME_SKIP_TESTS='test_'`
+    - targeted issue64 probe via `EXTRA_TEST_CMD`
+
+- Shared pyperformance worker unblock:
+  - root cause:
+    - the pyperformance worker inherited `PYTHONJITDISABLE=1` before `sitecustomize` could clear it
+  - entrypoint fix now used for validation:
+    - stop setting `PYTHONJITDISABLE=1` in the worker startup probe
+    - remove `PYTHONJITDISABLE` from the autojit worker `--inherit-environ` list
+  - worker proof:
+    - current:
+      - `/root/work/arm-sync/pyperf_venv_20260324_102122_worker.json`
+    - base:
+      - `/root/work/arm-sync/pyperf_venv_20260324_103221_worker.json`
+    - both worker probes report:
+      - `jit_enabled = true`
+      - `ok = true`
+
+- Formal pyperformance benchmark:
+  - current single-benchmark run through the unified entrypoint:
+    - jitlist:
+      - `/root/work/arm-sync/unpickle_pure_python_jitlist_20260324_101338.json`
+      - value: `0.00033071145001031257 s`
+    - autojit50:
+      - `/root/work/arm-sync/unpickle_pure_python_autojit50_20260324_101338.json`
+      - value: `0.00033676875000310247 s`
+    - compile summary:
+      - `/root/work/arm-sync/unpickle_pure_python_autojit50_20260324_101338_compile_summary.json`
+      - `main_compile_count = 4`
+      - `total_compile_count = 4`
+      - `other_compile_count = 0`
+  - repeat-run note:
+    - later reruns reached the worker validation stage but did not emit fresh benchmark JSONs
+    - latest worker-only artifacts:
+      - `/root/work/arm-sync/pyperf_venv_20260324_104604_worker.json`
+      - `/root/work/arm-sync/pyperf_venv_20260324_105148_worker.json`
+    - current interpretation:
+      - this is a shared pyperformance environment flake during benchmark setup
+      - it is not evidence of an issue64 code regression because the worker still initializes JIT correctly
+
+- Requested safety-set regression compare:
+  - current run:
+    - `/root/work/arm-sync/generators,coroutines,comprehensions,richards,richards_super,float,go,deltablue,raytrace,nqueens,nbody,unpack_sequence,fannkuch,coverage,scimark,spectral_norm,chaos,logging_jitlist_20260324_102122.json`
+    - `/root/work/arm-sync/generators,coroutines,comprehensions,richards,richards_super,float,go,deltablue,raytrace,nqueens,nbody,unpack_sequence,fannkuch,coverage,scimark,spectral_norm,chaos,logging_autojit50_20260324_102122.json`
+  - base run:
+    - `/root/work/arm-sync/generators,coroutines,comprehensions,richards,richards_super,float,go,deltablue,raytrace,nqueens,nbody,unpack_sequence,fannkuch,coverage,scimark,spectral_norm,chaos,logging_jitlist_20260324_103221.json`
+    - `/root/work/arm-sync/generators,coroutines,comprehensions,richards,richards_super,float,go,deltablue,raytrace,nqueens,nbody,unpack_sequence,fannkuch,coverage,scimark,spectral_norm,chaos,logging_autojit50_20260324_103221.json`
+  - autojit compile summaries:
+    - current:
+      - `main_compile_count = 4`
+      - `total_compile_count = 4`
+      - `other_compile_count = 0`
+    - base:
+      - `main_compile_count = 4`
+      - `total_compile_count = 4`
+      - `other_compile_count = 0`
+  - notable `jitlist` deltas vs base:
+    - `scimark_lu +22.72%`
+    - `scimark_monte_carlo +11.62%`
+    - `coroutines +6.53%`
+    - `fannkuch +3.87%`
+    - `chaos +3.75%`
+    - `generators +3.51%`
+    - `richards -0.17%`
+    - `richards_super +0.02%`
+  - notable `autojit50` deltas vs base:
+    - `generators +11.97%`
+    - `richards +4.14%`
+    - `scimark_lu +3.56%`
+    - `scimark_monte_carlo +2.90%`
+    - `logging_format +2.79%`
+    - `coroutines +1.86%`
+    - `richards_super -1.88%`
+    - `spectral_norm -7.48%`
+    - `go -7.33%`
+  - interpretation:
+    - no requested benchmark shows a consistent material regression across both modes
+    - the remaining positive signals are single-sample pyperformance deltas and should be treated as follow-up candidates, not issue64 blockers

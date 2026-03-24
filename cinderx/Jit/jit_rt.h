@@ -203,6 +203,19 @@ PyObject* JITRT_GetDictItemMissSentinel(void);
  * Returns either a new reference to `x` or a new tuple built from `y`.
  */
 PyObject* JITRT_DeepcopyTuplePostMiss(PyObject* x, PyObject* y);
+
+/*
+ * Narrow helper for the stdlib pickle._Unpickler.load() stop path.
+ *
+ * Returns self.stack.pop() while preserving normal Python exceptions.
+ */
+PyObject* JITRT_PickleUnpicklerPopStack(PyObject* self);
+
+/*
+ * Return 1 when key is the stdlib pickle STOP opcode byte string, else 0.
+ * This helper never sets a Python exception.
+ */
+int JITRT_PickleIsStopKey(PyObject* key);
 #endif
 
 /*

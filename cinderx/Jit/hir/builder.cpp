@@ -682,6 +682,21 @@ bool isCopyDeepcopyTupleFunction(BorrowedRef<PyCodeObject> code) {
   return nameEquals(code->co_name, "_deepcopy_tuple") && code->co_argcount == 3;
 }
 
+bool isPickleUnpicklerLoadFunction(BorrowedRef<PyCodeObject> code) {
+  if (code == nullptr || code->co_argcount != 1 ||
+      !PyUnicode_Check(code->co_qualname) || !PyUnicode_Check(code->co_filename)) {
+    return false;
+  }
+  const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+  const char* filename = PyUnicode_AsUTF8(code->co_filename);
+  if (qualname == nullptr || filename == nullptr) {
+    PyErr_Clear();
+    return false;
+  }
+  return std::strcmp(qualname, "_Unpickler.load") == 0 &&
+      std::strstr(filename, "pickle.py") != nullptr;
+}
+
 int findLocalIndexByName(BorrowedRef<PyCodeObject> code, const char* name) {
   int nlocalsplus = numLocalsplus(code);
   for (int i = 0; i < nlocalsplus; ++i) {
@@ -2497,6 +2512,11 @@ void HIRBuilder::emitAnyCall(
   if (tryInlineTupleGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
     return;
   }
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+  if (tryRewritePickleLoadStopCall(cfg, tc, bc_it, bc_instrs)) {
+    return;
+  }
+#endif
   bool is_awaited;
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
     is_awaited = false;
@@ -3289,6 +3309,84 @@ bool HIRBuilder::tryEmitDeepcopyDictSubscrRewrite(
 
   tc.block = hit_block;
   tc.frame.stack.push(result);
+  return true;
+}
+
+bool HIRBuilder::tryRewritePickleLoadStopCall(
+    CFG& cfg,
+    TranslationContext& tc,
+    jit::BytecodeInstructionBlock::Iterator& bc_it,
+    const jit::BytecodeInstructionBlock& bc_instrs) {
+  if (!isPickleUnpicklerLoadFunction(code_)) {
+    return false;
+  }
+
+  BytecodeInstruction bc_instr = *bc_it;
+  if (bc_instr.opcode() != CALL || bc_instr.oparg() != 1 || kwnames_ != nullptr ||
+      tc.frame.stack.size() < 3) {
+    return false;
+  }
+
+  auto next_it = bc_it;
+  ++next_it;
+  if (next_it == bc_instrs.end() || next_it->opcode() != POP_TOP) {
+    return false;
+  }
+
+  Register* self_arg = tc.frame.stack.top();
+  Register* null_sentinel = tc.frame.stack.top(1);
+  if (!isNullSentinel(null_sentinel)) {
+    return false;
+  }
+
+  int key_local_idx = findLocalIndexByName(code_, "key");
+  if (key_local_idx < 0 ||
+      key_local_idx >= static_cast<int>(tc.frame.localsplus.size())) {
+    return false;
+  }
+  Register* key = tc.frame.localsplus.at(key_local_idx);
+  if (key == nullptr) {
+    return false;
+  }
+
+  Register* is_stop_key = temps_.AllocateStack();
+  BasicBlock* stop_block = cfg.AllocateBlock();
+  BasicBlock* generic_block = cfg.AllocateBlock();
+
+  auto* stop_check = tc.emit<CallStatic>(
+      1,
+      is_stop_key,
+      reinterpret_cast<void*>(JITRT_PickleIsStopKey),
+      TCInt32);
+  stop_check->SetOperand(0, key);
+  tc.emit<CondBranch>(is_stop_key, stop_block, generic_block);
+
+  TranslationContext stop_tc{stop_block, tc.frame};
+  stop_tc.frame.stack.pop();
+  stop_tc.frame.stack.pop();
+  stop_tc.frame.stack.pop();
+  Register* stop_result = temps_.AllocateStack();
+  auto* helper_call = stop_tc.emit<CallStatic>(
+      1,
+      stop_result,
+      reinterpret_cast<void*>(JITRT_PickleUnpicklerPopStack),
+      TOptObject);
+  helper_call->SetOperand(0, self_arg);
+  stop_tc.emit<CheckExc>(stop_result, stop_result, stop_tc.frame);
+  stop_tc.emit<Return>(stop_result);
+
+  tc.block = generic_block;
+  Register* out = temps_.AllocateStack();
+  auto* call = tc.emit<CallMethod>(3, out, CallFlags::None);
+  for (auto i = 3; i > 0; i--) {
+    Register* arg = tc.frame.stack.pop();
+    call->SetOperand(i - 1, arg);
+  }
+  call->setFrameState(tc.frame);
+  tc.frame.stack.push(out);
+  tc.frame.stack.pop();
+
+  bc_it = next_it;
   return true;
 }
 #endif
