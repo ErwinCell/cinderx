@@ -3864,6 +3864,82 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "{32, 10, 43, 21}", proc.stdout)
 
+    def test_set_genexpr_hot_loop_hoists_makefunction_chain(self) -> None:
+        # Regression guard:
+        # after set-genexpr inlining, the residual MakeFunction closure chain
+        # should be hoisted out of the innermost hot path so the loop body no
+        # longer rebuilds it on every generator iteration.
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(2)
+
+            def hot():
+                data = tuple(range(8))
+                for _ in range(50000):
+                    set(data[i] + i for i in range(8))
+
+            for _ in range(3):
+                hot()
+
+            hot_func = None
+            for f in jit.get_compiled_functions():
+                if f.__qualname__ == "hot":
+                    hot_func = f
+                    break
+
+            assert hot_func is not None
+            counts = cinderjit.get_function_hir_opcode_counts(hot_func)
+            print(counts.get("MakeFunction", 0))
+            print(counts.get("MakeTuple", 0))
+            print(counts.get("SetFunctionAttr", 0))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/set_genexpr_hot_loop_hoist.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            env = dict(os.environ)
+            env["PYTHONJITDUMPFINALHIR"] = "1"
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            dump = proc.stdout + "\n" + proc.stderr
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(int(lines[-1]), 1, proc.stdout)
+
+            hot_marker = "Optimized HIR for __main__:hot:"
+            hot_start = dump.find(hot_marker)
+            self.assertNotEqual(hot_start, -1, dump)
+            hot_dump = dump[hot_start:]
+
+            make_pos = hot_dump.find("MakeFunction")
+            first_invoke = hot_dump.find("InvokeIterNext")
+            second_invoke = hot_dump.find("InvokeIterNext", first_invoke + 1)
+            self.assertNotEqual(make_pos, -1, dump)
+            self.assertNotEqual(first_invoke, -1, hot_dump)
+            self.assertNotEqual(second_invoke, -1, hot_dump)
+            self.assertLess(make_pos, second_invoke, hot_dump)
+
     def test_set_genexpr_preserves_exception_behavior(self) -> None:
         code = textwrap.dedent(
             """
