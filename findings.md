@@ -4298,3 +4298,55 @@ Conclusion:
   - interpretation:
     - no requested benchmark shows a consistent material regression across both modes
     - the remaining positive signals are single-sample pyperformance deltas and should be treated as follow-up candidates, not issue64 blockers
+
+- 2026-03-24 follow-up: fix nested pickle method-call regression exposed by `pickle:*`
+  - regression symptom from user benchmark method:
+    - `pickle._Pickler.save_dict()` failed during warmup/calibration
+    - error:
+      - `_Pickler._batch_setitems() missing 2 required positional arguments: 'items' and 'obj'`
+  - root cause:
+    - the profiled `LOAD_ATTR_METHOD_WITH_VALUES` recovery path used one global
+      `pending_method_with_values_call_`
+    - in nested-call shapes such as:
+      - `self._batch_setitems(obj.items(), obj)`
+    - the outer pending call for `_batch_setitems` was incorrectly consumed by the
+      inner `obj.items()` `CALL 0`
+    - this misbound the call as `_batch_setitems(self)` and dropped the two real arguments
+  - fix:
+    - bind the pending fast path to the exact `LoadMethod` register produced for the
+      profiled outer call
+    - only consume the pending fast path when the current `CALL` is using that same
+      callable register
+    - keep the pending fast path live across unrelated nested calls while the original
+      outer callable is still on the stack
+  - targeted regression proof on current build from clean `scratch/lib...`:
+    - direct `save_dict` reproducer:
+      - output:
+        - `43`
+        - `True`
+    - direct `_Unpickler.load` probe:
+      - output:
+        - `0`
+        - `0`
+        - `400000`
+  - user-style benchmark verification using current build via `PYTHONPATH=scratch/lib...`:
+    - command shape:
+      - `PYTHONJITTYPEANNOTATIONGUARDS=1`
+      - `PYTHONJITENABLEJITLISTWILDCARDS=1`
+      - `PYTHONJITENABLEHIRINLINER=1`
+      - `PYTHONJITAUTO=2`
+      - `PYTHONJITSPECIALIZEDOPCODES=1`
+      - `PYTHONJITLISTFILE=.../issue64_pickle_jit_list.txt`
+      - `python -m pyperformance run --warmup 3 -b unpickle_pure_python ...`
+    - result:
+      - benchmark completed successfully
+      - no `Benchmark died`
+      - artifact:
+        - `/root/work/arm-sync/issue64_pickle_user_repro_fix_scratch.json`
+      - value:
+        - `0.0023073401000146985 s`
+  - environment caveat:
+    - the shared `/root/venv-cinderx314` driver venv is polluted by older branch-local installs
+    - final trust for this regression round comes from:
+      - the clean `scratch/lib...` direct probes
+      - the clean `scratch/lib...` benchmark reproduction

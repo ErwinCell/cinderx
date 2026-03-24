@@ -2691,21 +2691,34 @@ bool HIRBuilder::tryEmitProfiledMethodWithValuesCall(
   }
 
   const PendingMethodWithValuesCall pending = *pending_method_with_values_call_;
+  auto stack_contains_pending_callable = [&]() {
+    for (std::size_t i = 0; i < tc.frame.stack.size(); i++) {
+      if (tc.frame.stack.peek(i) == pending.callable) {
+        return true;
+      }
+    }
+    return false;
+  };
   std::size_t num_operands = static_cast<std::size_t>(bc_instr.oparg()) + 2;
   if (tc.frame.stack.size() < num_operands) {
     JIT_DLOG(
         "profiled-mwv call skipped: stack too small {} < {}",
         tc.frame.stack.size(),
         num_operands);
-    pending_method_with_values_call_.reset();
+    if (!stack_contains_pending_callable()) {
+      pending_method_with_values_call_.reset();
+    }
     return false;
   }
   Register* callable_reg = tc.frame.stack.peek(num_operands);
-  if (!callable_reg->instr()->IsLoadMethod()) {
+  if (callable_reg != pending.callable) {
     JIT_DLOG(
-        "profiled-mwv call skipped: callable is {}",
-        callable_reg->instr()->opname());
-    pending_method_with_values_call_.reset();
+        "profiled-mwv call skipped: callable mismatch {} != {}",
+        static_cast<void*>(callable_reg),
+        static_cast<void*>(pending.callable));
+    if (!stack_contains_pending_callable()) {
+      pending_method_with_values_call_.reset();
+    }
     return false;
   }
 
@@ -4342,8 +4355,19 @@ void HIRBuilder::emitLoadAttr(
           // Re-emitting the same hybrid branch inside already-inlined callees
           // creates a nested shape that later HIR passes do not handle well yet.
           if (tc.frame.parent == nullptr) {
+            Register* result = temps_.AllocateStack();
+            Register* method_instance = temps_.AllocateStack();
+            tc.emit<LoadMethod>(result, receiver, name_idx, tc.frame);
+            tc.emit<GetSecondOutput>(method_instance, TOptObject, result);
             pending_method_with_values_call_ = PendingMethodWithValuesCall{
-                receiver, descr, bc_instr.cacheU32(2), bc_instr.cacheU32(4)};
+                receiver,
+                result,
+                descr,
+                bc_instr.cacheU32(2),
+                bc_instr.cacheU32(4)};
+            tc.frame.stack.push(result);
+            tc.frame.stack.push(method_instance);
+            return;
           } else {
             pending_method_with_values_call_.reset();
           }

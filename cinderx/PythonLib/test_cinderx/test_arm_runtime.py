@@ -4540,6 +4540,51 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 400000, proc.stdout)
 
+    def test_pickle_save_dict_nested_method_call_keeps_arguments(self) -> None:
+        code = textwrap.dedent(
+            """
+            import pickle
+            import cinderx.jit as jit
+
+            payload = [{"a": 1}, {"b": 2}, {"c": 3}]
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            assert jit.force_compile(pickle._Pickler.save_dict)
+            assert jit.is_jit_compiled(pickle._Pickler.save_dict)
+
+            data = pickle.dumps(payload, protocol=5)
+            restored = pickle.loads(data)
+            print(len(data))
+            print(restored == payload)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/pickle_save_dict_nested_call.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertGreater(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(lines[-1], "True", proc.stdout)
+
 
 if __name__ == "__main__":
     # Keep incidental unittest/traceback paths interpreted unless a test

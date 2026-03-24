@@ -611,6 +611,7 @@ class HIRBuilder {
 
   struct PendingMethodWithValuesCall {
     Register* receiver{nullptr};
+    Register* callable{nullptr};
     PyObject* descr{nullptr};
     uint32_t type_version{0};
     uint32_t keys_version{0};
