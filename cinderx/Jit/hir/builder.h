@@ -91,11 +91,13 @@ std::unique_ptr<Function> buildHIR(const Preloader& preloader);
 struct InlineResult {
   BasicBlock* entry{nullptr};
   BasicBlock* exit{nullptr};
+  BasicBlock* success{nullptr};
 };
 
 enum class InlineGenexprCollectorKind {
   kSet,
   kList,
+  kAny,
 };
 
 class HIRBuilder {
@@ -153,6 +155,12 @@ class HIRBuilder {
       jit::BytecodeInstructionBlock::Iterator& bc_it,
       const jit::BytecodeInstructionBlock& bc_instrs);
   bool tryInlineSetGenexprCall(
+      Function& irfunc,
+      CFG& cfg,
+      TranslationContext& tc,
+      jit::BytecodeInstructionBlock::Iterator& bc_it,
+      const jit::BytecodeInstructionBlock& bc_instrs);
+  bool tryInlineAnyGenexprCall(
       Function& irfunc,
       CFG& cfg,
       TranslationContext& tc,
@@ -635,6 +643,8 @@ class HIRBuilder {
       InlineGenexprCollectorKind::kSet};
   Register* inline_genexpr_closure_{nullptr};
   BasicBlock* inline_genexpr_exit_{nullptr};
+  BasicBlock* inline_genexpr_success_{nullptr};
+  CFG* inline_genexpr_cfg_{nullptr};
   std::vector<std::unique_ptr<FrameState>> inline_genexpr_parent_frames_;
   std::optional<PendingMethodWithValuesCall> pending_method_with_values_call_;
   bool stop_block_translation_{false};
