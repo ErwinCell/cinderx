@@ -3864,6 +3864,58 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "{32, 10, 43, 21}", proc.stdout)
 
+    def test_any_genexpr_eliminates_generator_call(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Widget:
+                def __init__(self, has_knob):
+                    self.has_knob = has_knob
+
+            def f(widgets):
+                return any(w.has_knob for w in widgets if w is not None)
+
+            assert jit.force_compile(f)
+            counts = cinderjit.get_function_hir_opcode_counts(f)
+            print(counts.get("CallMethod", 0))
+            print(counts.get("MakeFunction", 0))
+            print(counts.get("InvokeIterNext", 0))
+            print(f([None, Widget(False), Widget(True)]))
+            print(f([None, Widget(False)]))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/any_genexpr_inline.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertEqual(int(lines[-5]), 0, proc.stdout)
+            self.assertEqual(int(lines[-4]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-3]), 1, proc.stdout)
+            self.assertEqual(lines[-2], "True", proc.stdout)
+            self.assertEqual(lines[-1], "False", proc.stdout)
+
     def test_set_genexpr_hot_loop_hoists_makefunction_chain(self) -> None:
         # Regression guard:
         # after set-genexpr inlining, the residual MakeFunction closure chain
