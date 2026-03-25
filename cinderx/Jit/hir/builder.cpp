@@ -3644,6 +3644,8 @@ bool HIRBuilder::tryInlineAnyGenexprCall(
     return false;
   }
 
+  tc.frame.stack.pop();
+  tc.frame.stack.pop();
   tc.emit<Branch>(inline_result.entry);
 
   TranslationContext true_tc{inline_result.success, tc.frame};
