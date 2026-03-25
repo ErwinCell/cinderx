@@ -3338,7 +3338,13 @@ bool HIRBuilder::tryEmitDeepcopyDictSubscrRewrite(
     return false;
   }
 
-  if (bc_instr.specializedOpcode() != BINARY_SUBSCR_DICT) {
+  bool is_dict_subscr_specialized =
+#if PY_VERSION_HEX >= 0x030E0000
+      bc_instr.specializedOpcode() == BINARY_OP_SUBSCR_DICT;
+#else
+      bc_instr.specializedOpcode() == BINARY_SUBSCR_DICT;
+#endif
+  if (!is_dict_subscr_specialized) {
     tc.emit<GuardType>(container, TDictExact, container, tc.frame);
   }
 
@@ -3628,13 +3634,22 @@ void HIRBuilder::emitBinaryOp(
         tc.emit<GuardType>(right, TUnicodeExact, right, tc.frame);
         break;
       case BINARY_SUBSCR_DICT:
+#if PY_VERSION_HEX >= 0x030E0000
+      case BINARY_OP_SUBSCR_DICT:
+#endif
         tc.emit<GuardType>(left, TDictExact, left, tc.frame);
         break;
       case BINARY_SUBSCR_LIST_INT:
+#if PY_VERSION_HEX >= 0x030E0000
+      case BINARY_OP_SUBSCR_LIST_INT:
+#endif
         tc.emit<GuardType>(left, TListExact, left, tc.frame);
         tc.emit<GuardType>(right, TLongExact, right, tc.frame);
         break;
       case BINARY_SUBSCR_TUPLE_INT:
+#if PY_VERSION_HEX >= 0x030E0000
+      case BINARY_OP_SUBSCR_TUPLE_INT:
+#endif
         tc.emit<GuardType>(left, TTupleExact, left, tc.frame);
         tc.emit<GuardType>(right, TLongExact, right, tc.frame);
         break;
