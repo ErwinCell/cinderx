@@ -275,6 +275,16 @@ PyObject* JITRT_Vectorcall(
     PyObject* kwnames);
 
 /*
+ * Performs a function call with a vectorcall when the callable is known to be
+ * an exact Python function object.
+ */
+PyObject* JITRT_VectorcallExactPyFunc(
+    PyObject* callable,
+    PyObject* const* args,
+    size_t nargsf,
+    PyObject* kwnames);
+
+/*
  * Call an exact method descriptor with METH_FASTCALL and a single explicit
  * argument, then handle periodic activities like JITRT_Vectorcall().
  */

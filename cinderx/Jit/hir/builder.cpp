@@ -674,6 +674,11 @@ struct DeepcopyDictSubscrPattern {
   BCOffset store_subscr_off{-1};
 };
 
+struct SendNoneLoopPattern {
+  BCOffset inner_loop_off{-1};
+  BCOffset outer_loop_off{-1};
+};
+
 bool isCopyKeepAliveFunction(BorrowedRef<PyCodeObject> code) {
   return nameEquals(code->co_name, "_keep_alive") && code->co_argcount == 2;
 }
@@ -813,6 +818,104 @@ std::optional<DeepcopyDictSubscrPattern> matchDeepcopyDictSubscrPattern(
   }
 
   return std::nullopt;
+}
+
+std::optional<SendNoneLoopPattern> matchSendNoneLoopPattern(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& call_instr) {
+  if (call_instr.opcode() != CALL || call_instr.oparg() != 1) {
+    return std::nullopt;
+  }
+
+  std::optional<BytecodeInstruction> prev_load_const;
+  std::optional<BytecodeInstruction> prev_load_attr;
+  bool found_call = false;
+  for (auto instr : BytecodeInstructionBlock{code}) {
+    if (instr == call_instr) {
+      found_call = true;
+      break;
+    }
+    prev_load_attr = prev_load_const;
+    prev_load_const = instr;
+  }
+  if (!found_call || !prev_load_const.has_value() || !prev_load_attr.has_value()) {
+    return std::nullopt;
+  }
+
+  if (prev_load_const->opcode() != LOAD_CONST ||
+      prev_load_attr->opcode() != LOAD_ATTR ||
+      !nameEquals(loadAttrName(code, *prev_load_attr), "send")) {
+    return std::nullopt;
+  }
+
+  BorrowedRef<> const_obj =
+      PyTuple_GET_ITEM(code->co_consts, prev_load_const->oparg());
+  if (const_obj != Py_None) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction pop_top = call_instr.nextInstr();
+  if (pop_top.opcode() != POP_TOP) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction backedge = pop_top.nextInstr();
+  if (backedge.opcode() != JUMP_BACKWARD) {
+    return std::nullopt;
+  }
+
+  SendNoneLoopPattern pattern;
+  pattern.inner_loop_off = backedge.getJumpTarget();
+
+  BytecodeInstruction handler_instr = backedge.nextInstr();
+  int max_scan = static_cast<int>(countIndices(code));
+  while (
+      max_scan-- > 0 &&
+      static_cast<size_t>(handler_instr.baseIndex().value()) <
+          countIndices(code) &&
+      handler_instr.opcode() != PUSH_EXC_INFO) {
+    handler_instr = handler_instr.nextInstr();
+  }
+  if (handler_instr.opcode() != PUSH_EXC_INFO) {
+    return std::nullopt;
+  }
+
+  handler_instr = handler_instr.nextInstr();
+  if (!nameEquals(loadGlobalName(code, handler_instr), "StopIteration")) {
+    return std::nullopt;
+  }
+
+  handler_instr = handler_instr.nextInstr();
+  if (handler_instr.opcode() != CHECK_EXC_MATCH) {
+    return std::nullopt;
+  }
+
+  handler_instr = handler_instr.nextInstr();
+  if (handler_instr.opcode() != POP_JUMP_IF_FALSE) {
+    return std::nullopt;
+  }
+
+  handler_instr = skipHandlerNoops(handler_instr.nextInstr());
+  if (handler_instr.opcode() != POP_TOP) {
+    return std::nullopt;
+  }
+
+  handler_instr = skipHandlerNoops(handler_instr.nextInstr());
+  if (handler_instr.opcode() != POP_EXCEPT) {
+    return std::nullopt;
+  }
+
+  BytecodeInstruction outer_jump = skipHandlerNoops(handler_instr.nextInstr());
+  if (outer_jump.opcode() != JUMP_BACKWARD) {
+    return std::nullopt;
+  }
+
+  pattern.outer_loop_off = outer_jump.getJumpTarget();
+  if (BytecodeInstruction{code, pattern.outer_loop_off}.opcode() != FOR_ITER) {
+    return std::nullopt;
+  }
+
+  return pattern;
 }
 
 #endif
@@ -2604,6 +2707,11 @@ void HIRBuilder::emitAnyCall(
       }
 
 generic_call:
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+      if (tryEmitSendNoneLoopRewrite(cfg, tc, bc_instr)) {
+        break;
+      }
+#endif
       // Manually set up the instruction instead of using emitVariadic.
       // kwnames_ isn't on the stack, but it has to be part of the operand
       // count.
@@ -3400,6 +3508,77 @@ bool HIRBuilder::tryRewritePickleLoadStopCall(
   tc.frame.stack.pop();
 
   bc_it = next_it;
+  return true;
+}
+
+bool HIRBuilder::tryEmitSendNoneLoopRewrite(
+    CFG& cfg,
+    TranslationContext& tc,
+    const jit::BytecodeInstruction& bc_instr) {
+  (void)cfg;
+
+  auto log_miss = [&](const char* reason) {
+    if (nameEquals(code_->co_name, "bench_coroutines")) {
+      JIT_LOG(
+          "send-none rewrite miss in {} at bc_off {}: {}",
+          preloader_.fullname(),
+          bc_instr.baseOffset(),
+          reason);
+    }
+  };
+
+  auto log_hit = [&]() {
+    if (nameEquals(code_->co_name, "bench_coroutines")) {
+      JIT_LOG(
+          "send-none rewrite hit in {} at bc_off {}",
+          preloader_.fullname(),
+          bc_instr.baseOffset());
+    }
+  };
+
+  if (kwnames_ != nullptr || tc.frame.stack.size() < 3) {
+    log_miss("stack/kwnames precondition");
+    return false;
+  }
+
+  auto pattern = matchSendNoneLoopPattern(code_, bc_instr);
+  if (!pattern.has_value()) {
+    log_miss("bytecode pattern");
+    return false;
+  }
+
+  Register* send_arg = tc.frame.stack.top();
+  Register* bound_self = tc.frame.stack.top(1);
+  Register* method = tc.frame.stack.top(2);
+
+  if (!bound_self->instr()->IsGetSecondOutput() ||
+      bound_self->instr()->GetOperand(0) != method) {
+    log_miss("bound self is not GetSecondOutput(method)");
+    return false;
+  }
+
+  if (!send_arg->instr()->IsLoadConst() ||
+      static_cast<LoadConst*>(send_arg->instr())->type().asObject() !=
+          Py_None) {
+    log_miss("send arg is not LoadConst(Py_None)");
+    return false;
+  }
+
+  tc.frame.stack.pop();
+  tc.frame.stack.pop();
+  tc.frame.stack.pop();
+
+  Register* send_result = temps_.AllocateStack();
+  tc.emit<Send>(bound_self, send_arg, send_result, tc.frame);
+
+  Register* done = temps_.AllocateNonStack();
+  tc.emit<GetSecondOutput>(done, TCInt64, send_result);
+
+  BasicBlock* done_block = getBlockAtOff(pattern->outer_loop_off);
+  BasicBlock* continue_block = getBlockAtOff(pattern->inner_loop_off);
+    tc.emit<CondBranch>(done, done_block, continue_block);
+    stop_block_translation_ = true;
+    log_hit();
   return true;
 }
 #endif
