@@ -1730,7 +1730,7 @@ void HIRBuilder::translate(
           break;
         }
         case TO_BOOL: {
-          emitToBool(tc);
+          emitToBool(tc, &bc_instr);
           break;
         }
         case COPY_DICT_WITHOUT_KEYS: {
@@ -4416,8 +4416,40 @@ void HIRBuilder::emitCompareOp(
   }
 }
 
-void HIRBuilder::emitToBool(TranslationContext& tc) {
+void HIRBuilder::emitToBool(
+    TranslationContext& tc,
+    const jit::BytecodeInstruction* bc_instr) {
   Register* operand = tc.frame.stack.pop();
+
+  if (bc_instr != nullptr && getConfig().specialized_opcodes) {
+    switch (bc_instr->specializedOpcode()) {
+#if PY_VERSION_HEX >= 0x030E0000
+      case TO_BOOL_NONE: {
+        tc.emit<GuardType>(operand, TNoneType, operand, tc.frame);
+        Register* false_obj = temps_.AllocateStack();
+        tc.emit<LoadConst>(false_obj, Type::fromObject(Py_False));
+        tc.frame.stack.push(false_obj);
+        return;
+      }
+      case TO_BOOL_BOOL:
+        tc.emit<GuardType>(operand, TBool, operand, tc.frame);
+        tc.frame.stack.push(operand);
+        return;
+      case TO_BOOL_INT:
+        tc.emit<GuardType>(operand, TLongExact, operand, tc.frame);
+        break;
+      case TO_BOOL_LIST:
+        tc.emit<GuardType>(operand, TListExact, operand, tc.frame);
+        break;
+      case TO_BOOL_STR:
+        tc.emit<GuardType>(operand, TUnicodeExact, operand, tc.frame);
+        break;
+#endif
+      default:
+        break;
+    }
+  }
+
   Register* truthy_result = temps_.AllocateStack();
   tc.emit<IsTruthy>(truthy_result, operand, tc.frame);
 
@@ -4482,6 +4514,11 @@ void HIRBuilder::emitJumpIf(
   BasicBlock* false_block = getBlockAtOff(false_offset);
 
   if (check_truthy) {
+    if (var->instr()->IsPrimitiveBoxBool()) {
+      tc.emit<CondBranch>(var->instr()->GetOperand(0), true_block, false_block);
+      return;
+    }
+
     Register* tval = temps_.AllocateNonStack();
     // Registers that hold the result of `IsTruthy` are guaranteed to never be
     // the home of a value left on the stack at the end of a basic block, so we
@@ -5774,6 +5811,13 @@ void HIRBuilder::emitPopJumpIf(
 
   if (bc_instr.opcode() == POP_JUMP_IF_FALSE ||
       bc_instr.opcode() == POP_JUMP_IF_TRUE) {
+    if constexpr (PY_VERSION_HEX >= 0x030E0000) {
+      if (var->instr()->IsPrimitiveBoxBool()) {
+        tc.emit<CondBranch>(var->instr()->GetOperand(0), true_block, false_block);
+        return;
+      }
+    }
+
     Register* is_true = temps_.AllocateNonStack();
     // In 3.14+ coercion to exactly Py_True or Py_False is performed by earlier
     // instructions. See GH-106008.
