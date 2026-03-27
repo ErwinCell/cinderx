@@ -2490,6 +2490,105 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
             self.assertEqual(float(lines[-1]), 48.0, proc.stdout)
 
+    def test_xml_etree_bench_parse_stays_interpreted(self) -> None:
+        if sys.version_info < (3, 14):
+            self.skipTest("requires Python 3.14 benchmark-specific guard")
+
+        code = textwrap.dedent(
+            """
+            import importlib
+            import importlib.util
+            import os
+            import tempfile
+
+            import cinderx.jit as jit
+
+            module_src = '''
+            def hot_add(n):
+                total = 0
+                for i in range(n):
+                    total += i
+                return total
+
+            def bench_parse(etree, xml_file, xml_data, xml_root):
+                for _ in range(30):
+                    root1 = etree.parse(xml_file).getroot()
+                    root2 = etree.fromstring(xml_data)
+                result1 = etree.tostring(root1)
+                result2 = etree.tostring(root2)
+                if result1 != result2:
+                    raise RuntimeError("serialisation check failed")
+                return len(result1) + len(result2)
+            '''
+
+            with tempfile.TemporaryDirectory() as tmp:
+                bench_dir = os.path.join(
+                    tmp,
+                    "pyperformance",
+                    "data-files",
+                    "benchmarks",
+                    "bm_xml_etree",
+                )
+                os.makedirs(bench_dir)
+                path = os.path.join(bench_dir, "run_benchmark.py")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(module_src)
+
+                spec = importlib.util.spec_from_file_location("__main__", path)
+                mod = importlib.util.module_from_spec(spec)
+                assert spec.loader is not None
+                spec.loader.exec_module(mod)
+
+                etree = importlib.import_module("xml.etree.ElementTree")
+                root = etree.Element("root")
+                for i in range(3):
+                    etree.SubElement(root, "child", idx=str(i)).text = str(i)
+                xml_data = etree.tostring(root)
+
+                fd, file_path = tempfile.mkstemp(dir=tmp)
+                os.close(fd)
+                etree.ElementTree(root).write(file_path)
+
+                jit.enable()
+                jit.enable_specialized_opcodes()
+                jit.compile_after_n_calls(2)
+
+                assert jit.force_compile(mod.hot_add)
+                assert mod.hot_add(10) == 45
+
+                result = -1
+                for _ in range(200):
+                    result = mod.bench_parse(etree, file_path, xml_data, root)
+
+                print(jit.is_jit_compiled(mod.hot_add))
+                print(jit.is_jit_compiled(mod.bench_parse))
+                print(result)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/xml_etree_bench_parse_interpreted.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertEqual(lines[-3], "True", proc.stdout)
+            self.assertEqual(lines[-2], "False", proc.stdout)
+            self.assertGreater(int(lines[-1]), 0, proc.stdout)
+
     def test_list_subclass_append_eliminates_callmethod(self) -> None:
         if sys.version_info < (3, 14):
             self.skipTest("requires Python 3.14 LOAD_ATTR_METHOD_WITH_VALUES")
