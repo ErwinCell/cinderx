@@ -98,6 +98,13 @@ int BytecodeInstruction::specializedOpcode() const {
     case CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS:
     case CALL_METHOD_DESCRIPTOR_NOARGS:
     case CALL_METHOD_DESCRIPTOR_O:
+#if PY_VERSION_HEX >= 0x030E0000
+    case TO_BOOL_BOOL:
+    case TO_BOOL_INT:
+    case TO_BOOL_LIST:
+    case TO_BOOL_NONE:
+    case TO_BOOL_STR:
+#endif
     case LOAD_ATTR_INSTANCE_VALUE:
     case LOAD_ATTR_METHOD_WITH_VALUES:
     case LOAD_ATTR_SLOT:
