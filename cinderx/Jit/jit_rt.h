@@ -182,6 +182,14 @@ PyObject* JITRT_LoadGlobalsDict(PyThreadState* tstate);
  */
 PyObject* JITRT_ListSlice(PyObject* list, PyObject* start, PyObject* stop);
 
+/*
+ * Fast path for `list[:k+1] = list[k::-1]` on exact lists.
+ *
+ * Falls back to generic Python slicing semantics when operand types are not
+ * exact fast-path shapes. Returns 0 on success and -1 on error.
+ */
+int JITRT_ListPrefixReverseAssign(PyObject* list, PyObject* index);
+
 #if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
 /*
  * Exact-dict item lookup for try/except KeyError lowering.
