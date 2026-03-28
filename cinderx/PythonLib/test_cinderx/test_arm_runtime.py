@@ -3494,6 +3494,101 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(lines[-1], "([10, 20], 30, [40, 50])", proc.stdout)
 
+    def test_list_prefix_reverse_assign_lowers_to_runtime_fastpath(self) -> None:
+        code = textwrap.dedent(
+            """
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            def flip_prefix(perm, k):
+                perm[: k + 1] = perm[k::-1]
+                return perm
+
+            def flip_window(perm, k):
+                perm[1 : k + 1] = perm[k::-1]
+                return perm
+
+            def flip_stride(perm, k):
+                perm[: k + 1] = perm[k::2]
+                return perm
+
+            hot = [0, 1, 2, 3, 4]
+            for _ in range(200000):
+                flip_prefix(hot, 3)
+                flip_window(hot, 3)
+                flip_stride(hot, 3)
+
+            assert jit.force_compile(flip_prefix)
+            assert jit.force_compile(flip_window)
+            assert jit.force_compile(flip_stride)
+            counts = cinderjit.get_function_hir_opcode_counts(flip_prefix)
+            print(counts.get("CallStatic", 0))
+            print(counts.get("StoreSubscr", 0))
+
+            a = [0, 1, 2, 3, 4]
+            print(flip_prefix(a, 3))
+            b = [0, 1, 2, 3, 4]
+            print(flip_prefix(b, -1))
+            c = [0, 1, 2, 3, 4]
+            print(flip_window(c, 3))
+            d = [0, 1, 2, 3, 4]
+            print(flip_stride(d, 3))
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/list_prefix_reverse_assign_fastpath.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "PYTHONJITENABLESLICEFASTPATH": "0"},
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            off_callstatic = int(lines[-6])
+            off_storesubscr = int(lines[-5])
+            self.assertEqual(lines[-4], "[3, 2, 1, 0, 4]", proc.stdout)
+            self.assertEqual(lines[-3], "[4, 3, 2, 1, 0, 0, 1, 2, 3, 4]", proc.stdout)
+            self.assertEqual(lines[-2], "[0, 3, 2, 1, 0, 4]", proc.stdout)
+            self.assertEqual(lines[-1], "[3, 4]", proc.stdout)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env={**os.environ, "PYTHONJITENABLESLICEFASTPATH": "1"},
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 6, proc.stdout)
+            on_callstatic = int(lines[-6])
+            on_storesubscr = int(lines[-5])
+            self.assertGreaterEqual(on_callstatic, off_callstatic + 1, proc.stdout)
+            self.assertLess(on_storesubscr, off_storesubscr, proc.stdout)
+            self.assertEqual(lines[-4], "[3, 2, 1, 0, 4]", proc.stdout)
+            self.assertEqual(lines[-3], "[4, 3, 2, 1, 0, 0, 1, 2, 3, 4]", proc.stdout)
+            self.assertEqual(lines[-2], "[0, 3, 2, 1, 0, 4]", proc.stdout)
+            self.assertEqual(lines[-1], "[3, 4]", proc.stdout)
+
     def test_istruthy_bool_uses_pointer_compare_fast_path(self) -> None:
         # Regression guard:
         # bool-heavy truthiness checks should not rely solely on
