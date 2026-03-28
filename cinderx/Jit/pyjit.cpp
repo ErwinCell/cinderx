@@ -122,26 +122,6 @@ bool isCinderModule(BorrowedRef<> module_name) {
   return name == "cinderx";
 }
 
-bool isXmlEtreeBenchParseCode(BorrowedRef<PyCodeObject> code) {
-  if (code == nullptr || !PyUnicode_Check(code->co_qualname) ||
-      !PyUnicode_Check(code->co_filename)) {
-    return false;
-  }
-
-  const char* qualname_cstr = PyUnicode_AsUTF8(code->co_qualname);
-  const char* filename_cstr = PyUnicode_AsUTF8(code->co_filename);
-  if (qualname_cstr == nullptr || filename_cstr == nullptr) {
-    PyErr_Clear();
-    return false;
-  }
-
-  std::string_view qualname{qualname_cstr};
-  std::string_view filename{filename_cstr};
-  return qualname == "bench_parse" &&
-      filename.find("bm_xml_etree/run_benchmark.py") !=
-      std::string_view::npos;
-}
-
 bool shouldAlwaysScheduleCompile(BorrowedRef<PyCodeObject> code) {
   // There's a config option for forcing all Static Python functions to be
   // compiled.
@@ -1149,9 +1129,6 @@ JitEligibility getCompilationEligibility(BorrowedRef<PyFunctionObject> func) {
   if (!hasRequiredFlags(code)) {
     return JitEligibility::Ineligible;
   }
-  if (isXmlEtreeBenchParseCode(code)) {
-    return JitEligibility::Ineligible;
-  }
 
   // Note: This is not the same as fetching the function's code object and
   // checking its module and qualname, as functions can be renamed after they
@@ -1182,9 +1159,6 @@ JitEligibility getCompilationEligibility(
   }
 
   if (!hasRequiredFlags(code)) {
-    return JitEligibility::Ineligible;
-  }
-  if (isXmlEtreeBenchParseCode(code)) {
     return JitEligibility::Ineligible;
   }
 

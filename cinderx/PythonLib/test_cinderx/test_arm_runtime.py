@@ -2490,84 +2490,61 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
             self.assertEqual(float(lines[-1]), 48.0, proc.stdout)
 
-    def test_xml_etree_bench_parse_stays_interpreted(self) -> None:
+    def test_module_attr_vectorcall_survives_zeroed_return_register(self) -> None:
         if sys.version_info < (3, 14):
-            self.skipTest("requires Python 3.14 benchmark-specific guard")
+            self.skipTest("requires Python 3.14 module attr specialization")
 
         code = textwrap.dedent(
             """
-            import importlib
             import importlib.util
-            import os
+            import sys
             import tempfile
+            import textwrap
 
             import cinderx.jit as jit
+            import cinderjit
 
-            module_src = '''
-            def hot_add(n):
-                total = 0
-                for i in range(n):
-                    total += i
-                return total
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
 
-            def bench_parse(etree, xml_file, xml_data, xml_root):
-                for _ in range(30):
-                    root1 = etree.parse(xml_file).getroot()
-                    root2 = etree.fromstring(xml_data)
-                result1 = etree.tostring(root1)
-                result2 = etree.tostring(root2)
-                if result1 != result2:
-                    raise RuntimeError("serialisation check failed")
-                return len(result1) + len(result2)
-            '''
+            module_src = textwrap.dedent(
+                '''
+                def tostring(x):
+                    return b"x"
 
-            with tempfile.TemporaryDirectory() as tmp:
-                bench_dir = os.path.join(
-                    tmp,
-                    "pyperformance",
-                    "data-files",
-                    "benchmarks",
-                    "bm_xml_etree",
-                )
-                os.makedirs(bench_dir)
-                path = os.path.join(bench_dir, "run_benchmark.py")
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(module_src)
+                def f(mod, x):
+                    for _ in range(30):
+                        y = x
+                    return mod.tostring(y)
+                '''
+            )
 
-                spec = importlib.util.spec_from_file_location("__main__", path)
-                mod = importlib.util.module_from_spec(spec)
-                assert spec.loader is not None
-                spec.loader.exec_module(mod)
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+                fh.write(module_src)
+                path = fh.name
 
-                etree = importlib.import_module("xml.etree.ElementTree")
-                root = etree.Element("root")
-                for i in range(3):
-                    etree.SubElement(root, "child", idx=str(i)).text = str(i)
-                xml_data = etree.tostring(root)
+            spec = importlib.util.spec_from_file_location("tmpjitmod", path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
 
-                fd, file_path = tempfile.mkstemp(dir=tmp)
-                os.close(fd)
-                etree.ElementTree(root).write(file_path)
+            for _ in range(200):
+                assert mod.f(mod, "a") == b"x"
 
-                jit.enable()
-                jit.enable_specialized_opcodes()
-                jit.compile_after_n_calls(2)
+            assert jit.force_compile(mod.f)
+            counts = cinderjit.get_function_hir_opcode_counts(mod.f)
+            result = mod.f(mod, "a")
 
-                assert jit.force_compile(mod.hot_add)
-                assert mod.hot_add(10) == 45
-
-                result = -1
-                for _ in range(200):
-                    result = mod.bench_parse(etree, file_path, xml_data, root)
-
-                print(jit.is_jit_compiled(mod.hot_add))
-                print(jit.is_jit_compiled(mod.bench_parse))
-                print(result)
+            print(jit.is_jit_compiled(mod.f))
+            print(counts.get("VectorCall", 0))
+            print(result.hex())
             """
         )
 
         with tempfile.TemporaryDirectory() as tmp:
-            script = f"{tmp}/xml_etree_bench_parse_interpreted.py"
+            script = f"{tmp}/module_attr_vectorcall_zeroed_retreg.py"
             with open(script, "w", encoding="utf-8") as fp:
                 fp.write(code)
 
@@ -2586,8 +2563,8 @@ class ArmRuntimeTests(unittest.TestCase):
             lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
             self.assertGreaterEqual(len(lines), 3, proc.stdout)
             self.assertEqual(lines[-3], "True", proc.stdout)
-            self.assertEqual(lines[-2], "False", proc.stdout)
-            self.assertGreater(int(lines[-1]), 0, proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(lines[-1], "78", proc.stdout)
 
     def test_list_subclass_append_eliminates_callmethod(self) -> None:
         if sys.version_info < (3, 14):
