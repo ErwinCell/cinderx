@@ -245,6 +245,75 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertEqual(int(lines[-2]), 0, proc.stdout)
             self.assertEqual(int(lines[-1]), 800, proc.stdout)
 
+    def test_to_bool_none_specialization_avoids_repeated_non_none_deopts(self) -> None:
+        # Regression guard:
+        # adaptive TO_BOOL_NONE in the interpreter is only a quickening hint.
+        # The JIT must not compile it into a permanent "value is None" guard,
+        # otherwise later non-None falsey values deopt on every execution.
+        code = textwrap.dedent(
+            """
+            import dis
+            import cinderx.jit as jit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Falsey:
+                def __bool__(self):
+                    return False
+
+            def f(x):
+                if x:
+                    return 1
+                return 0
+
+            for _ in range(200000):
+                f(None)
+
+            opnames = [instr.opname for instr in dis.get_instructions(f, adaptive=True)]
+            assert "TO_BOOL_NONE" in opnames, opnames
+            assert jit.force_compile(f)
+            assert jit.is_jit_compiled(f)
+
+            jit.get_and_clear_runtime_stats()
+            total = 0
+            for _ in range(200):
+                total += f(Falsey())
+
+            stats = jit.get_and_clear_runtime_stats()
+            deopt_count = sum(
+                entry["int"]["count"]
+                for entry in stats.get("deopt", [])
+                if entry["normal"]["func_qualname"] == "f"
+            )
+            print(deopt_count)
+            print(total)
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/to_bool_none_no_repeated_deopt.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 2, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(int(lines[-1]), 0, proc.stdout)
+
     def test_specialized_numeric_leaf_mixed_types_avoid_deopts(self) -> None:
         # Regression guard:
         # specialized numeric opcodes should not pin no-backedge leaf helpers

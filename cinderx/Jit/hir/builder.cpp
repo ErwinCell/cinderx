@@ -4424,13 +4424,10 @@ void HIRBuilder::emitToBool(
   if (bc_instr != nullptr && getConfig().specialized_opcodes) {
     switch (bc_instr->specializedOpcode()) {
 #if PY_VERSION_HEX >= 0x030E0000
-      case TO_BOOL_NONE: {
-        tc.emit<GuardType>(operand, TNoneType, operand, tc.frame);
-        Register* false_obj = temps_.AllocateStack();
-        tc.emit<LoadConst>(false_obj, Type::fromObject(Py_False));
-        tc.frame.stack.push(false_obj);
-        return;
-      }
+      // CPython's adaptive TO_BOOL_NONE is only a quickening hint: non-None
+      // values fall back to generic TO_BOOL in the interpreter. Lowering it to
+      // a permanent None guard in JIT code turns shape changes into repeated
+      // deopts, so we intentionally leave it on the generic path here.
       case TO_BOOL_BOOL:
         tc.emit<GuardType>(operand, TBool, operand, tc.frame);
         tc.frame.stack.push(operand);
