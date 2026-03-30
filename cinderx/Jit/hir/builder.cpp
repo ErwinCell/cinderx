@@ -758,6 +758,20 @@ struct SendNoneLoopPattern {
   BCOffset outer_loop_off{-1};
 };
 
+enum class PickleUnframerHotPathKind {
+  kNone,
+  kRead,
+  kLoadFrame,
+};
+
+struct PickleUnframerHotPathPattern {
+  PickleUnframerHotPathKind kind{PickleUnframerHotPathKind::kNone};
+  BCOffset false_off{-1};
+  BCOffset continue_off{-1};
+  int arg_local_idx{-1};
+  int result_local_idx{-1};
+};
+
 bool isCopyKeepAliveFunction(BorrowedRef<PyCodeObject> code) {
   return nameEquals(code->co_name, "_keep_alive") && code->co_argcount == 2;
 }
@@ -766,19 +780,66 @@ bool isCopyDeepcopyTupleFunction(BorrowedRef<PyCodeObject> code) {
   return nameEquals(code->co_name, "_deepcopy_tuple") && code->co_argcount == 3;
 }
 
-bool isPickleUnpicklerLoadFunction(BorrowedRef<PyCodeObject> code) {
-  if (code == nullptr || code->co_argcount != 1 ||
+bool isStdlibPickleMethod(
+    BorrowedRef<PyCodeObject> code,
+    const char* qualname,
+    int argcount) {
+  if (code == nullptr || code->co_argcount != argcount ||
       !PyUnicode_Check(code->co_qualname) || !PyUnicode_Check(code->co_filename)) {
     return false;
   }
-  const char* qualname = PyUnicode_AsUTF8(code->co_qualname);
+  const char* actual_qualname = PyUnicode_AsUTF8(code->co_qualname);
   const char* filename = PyUnicode_AsUTF8(code->co_filename);
-  if (qualname == nullptr || filename == nullptr) {
+  if (actual_qualname == nullptr || filename == nullptr) {
     PyErr_Clear();
     return false;
   }
-  return std::strcmp(qualname, "_Unpickler.load") == 0 &&
+  return std::strcmp(actual_qualname, qualname) == 0 &&
       std::strstr(filename, "pickle.py") != nullptr;
+}
+
+bool isPickleUnpicklerLoadFunction(BorrowedRef<PyCodeObject> code) {
+  return isStdlibPickleMethod(code, "_Unpickler.load", 1);
+}
+
+bool isPickleUnframerReadFunction(BorrowedRef<PyCodeObject> code) {
+  return isStdlibPickleMethod(code, "_Unframer.read", 2);
+}
+
+bool isPickleUnframerLoadFrameFunction(BorrowedRef<PyCodeObject> code) {
+  return isStdlibPickleMethod(code, "_Unframer.load_frame", 2);
+}
+
+std::optional<PickleUnframerHotPathPattern> matchPickleUnframerHotPathPattern(
+    BorrowedRef<PyCodeObject> code,
+    const BytecodeInstruction& bc_instr) {
+  if (bc_instr.baseOffset() != BCOffset{24}) {
+    return std::nullopt;
+  }
+
+  if (isPickleUnframerReadFunction(code) &&
+      bc_instr.opcode() == TO_BOOL) {
+    return PickleUnframerHotPathPattern{
+        PickleUnframerHotPathKind::kRead,
+        BCOffset{196},
+        BCOffset{80},
+        1,
+        2,
+    };
+  }
+
+  if (isPickleUnframerLoadFrameFunction(code) &&
+      bc_instr.opcode() == TO_BOOL) {
+    return PickleUnframerHotPathPattern{
+        PickleUnframerHotPathKind::kLoadFrame,
+        BCOffset{106},
+        BCOffset{84},
+        -1,
+        -1,
+    };
+  }
+
+  return std::nullopt;
 }
 
 int findLocalIndexByName(BorrowedRef<PyCodeObject> code, const char* name) {
@@ -786,6 +847,16 @@ int findLocalIndexByName(BorrowedRef<PyCodeObject> code, const char* name) {
   for (int i = 0; i < nlocalsplus; ++i) {
     if (nameEquals(jit::getVarname(code, i), name)) {
       return i;
+    }
+  }
+  return -1;
+}
+
+int findNameIndexByName(BorrowedRef<PyCodeObject> code, const char* name) {
+  BorrowedRef<PyTupleObject> names{reinterpret_cast<PyTupleObject*>(code->co_names)};
+  for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(names); ++i) {
+    if (nameEquals(PyTuple_GET_ITEM(names, i), name)) {
+      return static_cast<int>(i);
     }
   }
   return -1;
@@ -1730,6 +1801,12 @@ void HIRBuilder::translate(
           break;
         }
         case TO_BOOL: {
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
+          if (tryRewritePickleUnframerCurrentFrameHotPath(
+                  irfunc.cfg, tc, bc_it)) {
+            break;
+          }
+#endif
           emitToBool(tc, &bc_instr);
           break;
         }
@@ -3603,6 +3680,67 @@ bool HIRBuilder::tryRewritePickleLoadStopCall(
   tc.frame.stack.push(out);
   tc.frame.stack.pop();
 
+  bc_it = next_it;
+  return true;
+}
+
+bool HIRBuilder::tryRewritePickleUnframerCurrentFrameHotPath(
+    CFG& cfg,
+    TranslationContext& tc,
+    jit::BytecodeInstructionBlock::Iterator& bc_it) {
+  auto pattern = matchPickleUnframerHotPathPattern(code_, *bc_it);
+  if (!pattern.has_value()) {
+    return false;
+  }
+  auto next_it = bc_it;
+  ++next_it;
+
+  Register* current_frame = tc.frame.stack.pop();
+  Register* is_true = temps_.AllocateNonStack();
+  tc.emit<IsTruthy>(is_true, current_frame, tc.frame);
+
+  BasicBlock* true_block = cfg.AllocateBlock();
+  BasicBlock* false_block = getBlockAtOff(pattern->false_off);
+  tc.emit<CondBranch>(is_true, true_block, false_block);
+
+  TranslationContext true_tc{true_block, tc.frame};
+  true_tc.frame.stack.push(current_frame);
+  int read_name_idx = findNameIndexByName(code_, "read");
+  JIT_CHECK(read_name_idx >= 0, "failed to find pickle current_frame.read name index");
+  emitLoadMethod(true_tc, read_name_idx);
+
+  int num_operands = 2;
+  if (pattern->arg_local_idx >= 0) {
+    Register* arg = true_tc.frame.localsplus.at(pattern->arg_local_idx);
+    JIT_CHECK(arg != nullptr, "missing pickle hot-path arg register");
+    true_tc.frame.stack.push(arg);
+    num_operands = 3;
+  }
+
+  Register* out = temps_.AllocateStack();
+  auto* call = true_tc.emit<CallMethod>(num_operands, out, CallFlags::None);
+  for (auto i = num_operands; i > 0; i--) {
+    Register* arg = true_tc.frame.stack.pop();
+    call->SetOperand(i - 1, arg);
+  }
+  call->setFrameState(true_tc.frame);
+
+  if (pattern->kind == PickleUnframerHotPathKind::kRead) {
+    Register* dst = true_tc.frame.localsplus.at(pattern->result_local_idx);
+    JIT_CHECK(dst != nullptr, "missing pickle hot-path result local");
+    moveOverwrittenStackRegisters(true_tc, dst);
+    true_tc.emit<Assign>(dst, out);
+    true_tc.emit<Branch>(getBlockAtOff(pattern->continue_off));
+    bc_it = next_it;
+    return true;
+  }
+
+  Register* is_non_empty = temps_.AllocateNonStack();
+  true_tc.emit<IsTruthy>(is_non_empty, out, true_tc.frame);
+  true_tc.emit<CondBranch>(
+      is_non_empty,
+      getBlockAtOff(pattern->continue_off),
+      getBlockAtOff(pattern->false_off));
   bc_it = next_it;
   return true;
 }
