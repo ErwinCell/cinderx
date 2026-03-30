@@ -2559,6 +2559,82 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
             self.assertEqual(float(lines[-1]), 48.0, proc.stdout)
 
+    def test_module_attr_vectorcall_survives_zeroed_return_register(self) -> None:
+        if sys.version_info < (3, 14):
+            self.skipTest("requires Python 3.14 module attr specialization")
+
+        code = textwrap.dedent(
+            """
+            import importlib.util
+            import sys
+            import tempfile
+            import textwrap
+
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            module_src = textwrap.dedent(
+                '''
+                def tostring(x):
+                    return b"x"
+
+                def f(mod, x):
+                    for _ in range(30):
+                        y = x
+                    return mod.tostring(y)
+                '''
+            )
+
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
+                fh.write(module_src)
+                path = fh.name
+
+            spec = importlib.util.spec_from_file_location("tmpjitmod", path)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+
+            for _ in range(200):
+                assert mod.f(mod, "a") == b"x"
+
+            assert jit.force_compile(mod.f)
+            counts = cinderjit.get_function_hir_opcode_counts(mod.f)
+            result = mod.f(mod, "a")
+
+            print(jit.is_jit_compiled(mod.f))
+            print(counts.get("VectorCall", 0))
+            print(result.hex())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/module_attr_vectorcall_zeroed_retreg.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 3, proc.stdout)
+            self.assertEqual(lines[-3], "True", proc.stdout)
+            self.assertGreaterEqual(int(lines[-2]), 1, proc.stdout)
+            self.assertEqual(lines[-1], "78", proc.stdout)
+
     def test_list_subclass_append_eliminates_callmethod(self) -> None:
         if sys.version_info < (3, 14):
             self.skipTest("requires Python 3.14 LOAD_ATTR_METHOD_WITH_VALUES")
