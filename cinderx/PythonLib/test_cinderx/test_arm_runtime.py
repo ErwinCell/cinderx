@@ -2246,6 +2246,78 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertIn("DoubleBinaryOp<Subtract>", dump)
             self.assertIn("DoubleBinaryOp<Multiply>", dump)
 
+    def test_self_only_float_leaf_method_keeps_double_fastpath(self) -> None:
+        # Regression guard:
+        # self-only float helpers like bm_float's Point.normalize() should keep
+        # the unboxed float fast path even without a backedge or non-self args.
+        code = textwrap.dedent(
+            """
+            from math import cos, sin, sqrt
+
+            import cinderx.jit as jit
+            import cinderjit
+
+            jit.enable()
+            jit.enable_specialized_opcodes()
+            jit.compile_after_n_calls(1000000)
+
+            class Point:
+                __slots__ = ("x", "y", "z")
+
+                def __init__(self, i):
+                    self.x = x = sin(i)
+                    self.y = cos(i) * 3.0
+                    self.z = (x * x) / 2.0
+
+                def normalize(self):
+                    x = self.x
+                    y = self.y
+                    z = self.z
+                    norm = sqrt(x * x + y * y + z * z)
+                    self.x /= norm
+                    self.y /= norm
+                    self.z /= norm
+
+            p = Point(1.25)
+            for _ in range(10000):
+                p.normalize()
+
+            assert jit.force_compile(Point.normalize)
+            counts = cinderjit.get_function_hir_opcode_counts(Point.normalize)
+            print(counts.get("DoubleBinaryOp", 0))
+            print(counts.get("DoubleSqrt", 0))
+            print(counts.get("VectorCall", 0))
+            print(counts.get("BinaryOp", 0))
+            print(p.normalize())
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"{tmp}/float_self_only_normalize.py"
+            with open(script, "w", encoding="utf-8") as fp:
+                fp.write(code)
+
+            proc = subprocess.run(
+                [sys.executable, script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=dict(os.environ),
+            )
+            self.assertEqual(
+                proc.returncode,
+                0,
+                f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
+            )
+
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 5, proc.stdout)
+            self.assertGreaterEqual(int(lines[-5]), 5, proc.stdout)
+            self.assertGreaterEqual(int(lines[-4]), 1, proc.stdout)
+            self.assertEqual(int(lines[-3]), 0, proc.stdout)
+            self.assertEqual(int(lines[-2]), 0, proc.stdout)
+            self.assertEqual(lines[-1], "None", proc.stdout)
+
     def test_float_pow_two_lowers_to_double_multiply(self) -> None:
         # Regression guard:
         # exact-float `x ** 2` should strength-reduce to the same unboxed
