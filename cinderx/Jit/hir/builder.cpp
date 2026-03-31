@@ -372,6 +372,17 @@ bool hasInferredNonSelfArgType(const Preloader& preloader) {
   return false;
 }
 
+bool hasStableSelfOnlyMethodType(const Preloader& preloader) {
+  return preloader.numArgs() == 1 && preloader.inferredSelfType().has_value();
+}
+
+bool shouldSpecializeFloatGuards(
+    BorrowedRef<PyCodeObject> code,
+    const Preloader& preloader) {
+  return codeHasBackedge(code) || hasStableSelfOnlyMethodType(preloader) ||
+      hasInferredNonSelfArgType(preloader);
+}
+
 Register* chaseAssign(Register* reg) {
   while (reg != nullptr && reg->instr()->IsAssign()) {
     reg = reg->instr()->GetOperand(0);
@@ -3755,13 +3766,14 @@ void HIRBuilder::emitBinaryOp(
   // functions, but can be actively harmful for tiny mixed-numeric leaf helpers
   // like raytrace's Vector.dot(). Keep the int guards only for code objects
   // that actually contain a backedge. Keep float exact guards for either
-  // loop-hot code or the narrow issue31-style leaf methods where we inferred
-  // a stable exact non-self argument type. Self-only helpers like
-  // Vector.scale() and generic helpers like addColours() should not keep the
-  // no-backedge float exact guards.
+  // loop-hot code, stable self-only leaf methods like bm_float's
+  // Point.normalize(), or the narrow issue31-style leaf methods where we
+  // inferred a stable exact non-self argument type. Self+factor helpers like
+  // Vector.scale() and generic helpers like addColours() should still stay on
+  // the no-guard generic path.
   bool specialize_int_guards = codeHasBackedge(code_);
   bool specialize_float_guards =
-      codeHasBackedge(code_) || hasInferredNonSelfArgType(preloader_);
+      shouldSpecializeFloatGuards(code_, preloader_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case BINARY_OP_ADD_INT:
@@ -4385,7 +4397,7 @@ void HIRBuilder::emitCompareOp(
   CompareOp op = static_cast<CompareOp>(compare_op);
   bool specialize_int_guards = codeHasBackedge(code_);
   bool specialize_float_guards =
-      codeHasBackedge(code_) || hasInferredNonSelfArgType(preloader_);
+      shouldSpecializeFloatGuards(code_, preloader_);
   if (getConfig().specialized_opcodes) {
     switch (bc_instr.specializedOpcode()) {
       case COMPARE_OP_FLOAT:
