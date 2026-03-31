@@ -15,6 +15,16 @@ def _is_truthy(value: str | None) -> bool:
     return value in {"1", "true", "TRUE", "yes", "YES", "on", "ON"}
 
 
+def _parse_compile_after(value: str | None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        calls = int(value)
+    except ValueError:
+        return None
+    return calls if calls >= 0 else None
+
+
 tokens = _argv_tokens()
 argv = getattr(sys, "argv", [])
 argv0 = argv[0] if argv else ""
@@ -75,6 +85,9 @@ if worker and not skip and os.environ.get("CINDERX_DISABLE") in (None, "", "0"):
 
         if os.environ.get("PYTHONJITDISABLE") in (None, "", "0"):
             jit.enable()
+            compile_after = _parse_compile_after(worker_autojit)
+            if compile_after is not None:
+                jit.compile_after_n_calls(compile_after)
             if _is_truthy(os.environ.get("CINDERX_ENABLE_SPECIALIZED_OPCODES")):
                 jit.enable_specialized_opcodes()
             entries = os.environ.get("CINDERX_JITLIST_ENTRIES", "")

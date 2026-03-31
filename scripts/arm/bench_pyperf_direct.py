@@ -91,6 +91,18 @@ def main() -> int:
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--prewarm-runs", type=int, default=0)
     parser.add_argument(
+        "--jit-mode",
+        choices=["force", "autojit"],
+        default="force",
+        help="Use force_compile on selected functions or trigger autojit after import",
+    )
+    parser.add_argument(
+        "--compile-after-n-calls",
+        type=int,
+        default=2,
+        help="Autojit threshold when --jit-mode=autojit",
+    )
+    parser.add_argument(
         "--compile-strategy",
         choices=["none", "all", "backedge", "names"],
         default="none",
@@ -116,7 +128,10 @@ def main() -> int:
         jit.enable_specialized_opcodes()
     else:
         jit.disable_specialized_opcodes()
-    jit.compile_after_n_calls(1000000)
+    if args.jit_mode == "autojit":
+        jit.compile_after_n_calls(args.compile_after_n_calls)
+    else:
+        jit.compile_after_n_calls(1000000)
 
     functions = collect_functions(module)
     explicit_names = {
@@ -128,13 +143,14 @@ def main() -> int:
         bench(*bench_args)
 
     compiled = []
-    for fn in candidates:
-        try:
-            ok = bool(jit.force_compile(fn))
-        except Exception:
-            ok = False
-        if ok:
-            compiled.append(fn.__qualname__)
+    if args.jit_mode == "force":
+        for fn in candidates:
+            try:
+                ok = bool(jit.force_compile(fn))
+            except Exception:
+                ok = False
+            if ok:
+                compiled.append(fn.__qualname__)
 
     samples = []
     all_deopts = []
@@ -151,6 +167,10 @@ def main() -> int:
         "module_path": str(module_path),
         "bench_func": args.bench_func,
         "bench_args": bench_args,
+        "jit_mode": args.jit_mode,
+        "compile_after_n_calls": (
+            args.compile_after_n_calls if args.jit_mode == "autojit" else None
+        ),
         "compile_strategy": args.compile_strategy,
         "specialized_opcodes": args.specialized_opcodes,
         "prewarm_runs": args.prewarm_runs,
