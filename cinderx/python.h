@@ -9,6 +9,15 @@
 
 #include <Python.h>
 
+#if defined(CINDERX_ENABLE_CPYTHON_314_ONLY)
+#if PY_VERSION_HEX < 0x030E0000 || PY_VERSION_HEX >= 0x030F0000
+#error "CINDERX_ENABLE_CPYTHON_314_ONLY requires CPython 3.14.x"
+#endif
+#define CINDERX_CPYTHON_314_ONLY 1
+#else
+#define CINDERX_CPYTHON_314_ONLY 0
+#endif
+
 #if PY_VERSION_HEX >= 0x030E0000
 #ifdef __THROW
 // mi_decl_throw is defined to be __THROW and breaks in C++ files.

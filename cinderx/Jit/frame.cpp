@@ -311,7 +311,13 @@ PyType_Slot framereifier_type_slots[] = {
 } // namespace
 
 Ref<> makeFrameReifier([[maybe_unused]] BorrowedRef<PyCodeObject> code) {
-#if PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+#if CINDERX_CPYTHON_314_ONLY && defined(ENABLE_LIGHTWEIGHT_FRAMES)
+  if (getConfig().frame_mode == FrameMode::kLightweight) {
+    // OSS 3.14 does not expose PyUnstable_MakeJITExecutable, so keep the
+    // executable as the code object itself.
+    return Ref<>::create((PyObject*)code);
+  }
+#elif PY_VERSION_HEX >= 0x030E0000 && defined(ENABLE_LIGHTWEIGHT_FRAMES)
   if (getConfig().frame_mode == FrameMode::kLightweight) {
 #if PY_VERSION_HEX >= 0x030F0000
     PyObject* reifier =
@@ -428,7 +434,9 @@ void jitFramePopulateFrame([[maybe_unused]] _PyInterpreterFrame* frame) {
 // is going to be transferred there.
 void jitFrameRemoveReifier(_PyInterpreterFrame* frame) {
 #ifdef ENABLE_LIGHTWEIGHT_FRAMES
-#if PY_VERSION_HEX >= 0x030F0000
+#if CINDERX_CPYTHON_314_ONLY
+  // No-op on OSS 3.14 fallback path: f_executable is already a code object.
+#elif PY_VERSION_HEX >= 0x030F0000
   PyObject* code = PyStackRef_AsPyObjectBorrow(frame->f_executable);
   if (PyUnstable_JITExecutable_Check(code)) {
     _PyStackRef existing = frame->f_executable;
@@ -500,11 +508,15 @@ void jitFrameSetFunction(_PyInterpreterFrame* frame, PyFunctionObject* func) {
 }
 
 BorrowedRef<PyFunctionObject> jitFrameGetFunction(_PyInterpreterFrame* frame) {
+#if CINDERX_CPYTHON_314_ONLY
+  return frameFunction(frame);
+#else
   if constexpr (PY_VERSION_HEX >= 0x030E0000) {
     return frameFunction(frame);
   }
   return reinterpret_cast<PyFunctionObject*>(
       jitFrameGetHeader(frame)->rtfs & ~JIT_FRAME_MASK);
+#endif
 }
 
 RuntimeFrameState* jitFrameGetRtfs(_PyInterpreterFrame* frame) {
@@ -537,7 +549,17 @@ void jitFrameInitLightweight(
   // frame allows us to use gen_traverse().
   frame->f_locals = nullptr;
   frame->frame_obj = nullptr;
-#if PY_VERSION_HEX >= 0x030E0000
+#if CINDERX_CPYTHON_314_ONLY
+  JIT_DCHECK(reifier, "reifier needed for lightweight frames");
+  frame->stackpointer = frame->localsplus;
+  setFrameInstruction(frame, _PyCode_CODE(code));
+#ifdef Py_GIL_DISABLED
+  frame->tlbc_index = 0;
+#endif
+  setFrameCode(frame, reifier);
+  setFrameFunction(frame, (PyObject*)Py_NewRef(func));
+  jitFrameGetHeader(frame)->rtfs = 0;
+#elif PY_VERSION_HEX >= 0x030E0000
   JIT_DCHECK(reifier, "reifier needed for lightweight frames");
   frame->stackpointer = frame->localsplus;
   setFrameInstruction(frame, _PyCode_CODE(code));
