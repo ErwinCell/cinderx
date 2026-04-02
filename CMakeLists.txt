@@ -13,6 +13,7 @@ cmake_minimum_required(VERSION 3.12)
 project(_cinderx)
 
 set(PROJECT_SOURCE_DIR ${PROJECT_SOURCE_DIR}/cinderx)
+set(CINDERX_SOURCE_DIR ${PROJECT_SOURCE_DIR})
 
 ##############################################################################
 # PGO (Profile-Guided Optimization) configuration
@@ -169,7 +170,10 @@ include(FetchContent)
 ########################################
 # python
 
-find_package(Python ${PY_VERSION} EXACT COMPONENTS Interpreter Development.Module REQUIRED)
+find_package(
+  Python ${PY_VERSION} EXACT
+  COMPONENTS Interpreter Development.Module Development.Embed
+  REQUIRED)
 
 # Some of our files are partially generated from CPython source, and they
 # expect to be able to include files relative to Include/internal.
@@ -240,6 +244,20 @@ if(NOT ZLIB_FOUND)
   elseif(TARGET zlib AND NOT TARGET ZLIB::ZLIB)
     add_library(ZLIB::ZLIB ALIAS zlib)
   endif()
+endif()
+
+option(BUILD_RUNTIME_TESTS "Build the RuntimeTests gtest binary" OFF)
+
+if(BUILD_RUNTIME_TESTS)
+  FetchContent_Declare(
+    googletest
+    URL https://codeload.github.com/google/googletest/tar.gz/v1.14.0
+    URL_HASH SHA256=8ad598c73ad796e0d8280b082cebd82a630d73e73cd3c70057938a6501bba5d7
+  )
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+  find_package(Threads REQUIRED)
 endif()
 
 ##############################################################################
@@ -343,7 +361,7 @@ target_link_libraries(static-python PRIVATE fmt::fmt asmjit::asmjit common borro
 # Jit/
 
 file(GLOB_RECURSE JIT_SOURCES ${PROJECT_SOURCE_DIR}/Jit/*.cpp ${PROJECT_SOURCE_DIR}/Jit/*.c)
-list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\.gen_cached\.c")
+list(FILTER JIT_SOURCES EXCLUDE REGEX ".*\\.gen_cached\\.c")
 if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 3.15)
   list(APPEND JIT_SOURCES "${PROJECT_SOURCE_DIR}/Jit/generators_borrowed_${PY_VERSION}.gen_cached.c")
 endif()
@@ -363,16 +381,30 @@ endif()
 add_library(parallel-gc ${PARALLEL_GC_SOURCES})
 
 ########################################
-# _cinderx.cpp
+# _cinderx internal support
 
-set(SOURCES
+set(CINDERX_INTERNAL_SOURCES
   # Manually listed out to not accidentally include stuff in .git.
-  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
   ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
   ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
   ${PROJECT_SOURCE_DIR}/module_state.cpp
   ${PROJECT_SOURCE_DIR}/module_c_state.cpp
   ${PROJECT_SOURCE_DIR}/python_runtime.cpp
+)
+
+add_library(cinderx-runtime-support STATIC ${CINDERX_INTERNAL_SOURCES})
+target_link_libraries(
+  cinderx-runtime-support
+  PUBLIC
+  Python::Python
+  borrowed cached-properties common immortalize interpreter jit parallel-gc static-python
+  asmjit::asmjit fmt::fmt)
+
+########################################
+# _cinderx.cpp
+
+set(SOURCES
+  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
 )
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
@@ -381,8 +413,7 @@ target_link_libraries(
   ${PROJECT_NAME}
   PRIVATE
   Python::Module
-  borrowed cached-properties common immortalize interpreter jit parallel-gc static-python
-  asmjit::asmjit fmt::fmt)
+  cinderx-runtime-support)
 
 # macOS doesn't allow depending on other shared libraries by default.
 if (${MACOS})
@@ -392,3 +423,7 @@ endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "_cinderx.so")
+
+if(BUILD_RUNTIME_TESTS)
+  add_subdirectory(${PROJECT_SOURCE_DIR}/RuntimeTests)
+endif()
