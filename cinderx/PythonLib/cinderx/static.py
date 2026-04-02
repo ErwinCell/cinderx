@@ -1,6 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # pyre-strict
 
+from . import is_static_python_enabled
+
+if not is_static_python_enabled():
+    raise ImportError(
+        "Static Python is disabled at build time (ENABLE_STATIC_PYTHON=0)"
+    )
+
 from _cinderx import StaticTypeError
 from _static import (
     __build_cinder_class__,

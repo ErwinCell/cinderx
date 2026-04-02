@@ -23,6 +23,12 @@ namespace jit::hir {
 
 namespace {
 
+#if defined(CINDER_ENABLE_STATIC_PYTHON)
+constexpr bool kStaticPythonEnabled = true;
+#else
+constexpr bool kStaticPythonEnabled = false;
+#endif
+
 static std::optional<OwnedType> infer_method_self_type_candidate(
     BorrowedRef<PyCodeObject> code,
     BorrowedRef<PyDictObject> globals) {
@@ -496,9 +502,11 @@ BorrowedRef<> Preloader::constArg(BytecodeInstruction& bc_instr) const {
 }
 
 bool Preloader::preload() {
-  bool is_static = code_->co_flags & CI_CO_STATICALLY_COMPILED;
-  if (is_static && !preloadStatic()) {
-    return false;
+  if constexpr (kStaticPythonEnabled) {
+    bool is_static = code_->co_flags & CI_CO_STATICALLY_COMPILED;
+    if (is_static && !preloadStatic()) {
+      return false;
+    }
   }
 
   inferred_self_type_ = infer_method_self_type_candidate(code_, globals_);
@@ -629,9 +637,11 @@ bool Preloader::preload() {
     }
   }
 
-  if (has_primitive_args_) {
-    prim_args_info_ = Ref<_PyTypedArgsInfo>::steal(
-        _PyClassLoader_GetTypedArgsInfo(code_, true));
+  if constexpr (kStaticPythonEnabled) {
+    if (has_primitive_args_) {
+      prim_args_info_ = Ref<_PyTypedArgsInfo>::steal(
+          _PyClassLoader_GetTypedArgsInfo(code_, true));
+    }
   }
   return true;
 }

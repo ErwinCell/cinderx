@@ -21,6 +21,12 @@ static_assert(sizeof(intptr_t) == sizeof(int64_t), "Expected 64-bit pointers");
 
 namespace {
 
+#if defined(CINDER_ENABLE_STATIC_PYTHON)
+constexpr bool kStaticPythonEnabled = true;
+#else
+constexpr bool kStaticPythonEnabled = false;
+#endif
+
 // For Types where it makes sense, map them to their corresponding
 // PyTypeObject*.
 const std::unordered_map<Type, PyTypeObject*>& typeToPyType() {
@@ -382,8 +388,10 @@ Type Type::fromTypeImpl(PyTypeObject* type, bool exact) {
   }
 
   // Heap types that we're aware of, not statically known
-  if (PyType_IsSubtype(type, PyStaticArray_Type)) {
-    return TArray;
+  if constexpr (kStaticPythonEnabled) {
+    if (PyType_IsSubtype(type, PyStaticArray_Type)) {
+      return TArray;
+    }
   }
 
   {
@@ -455,8 +463,10 @@ PyTypeObject* Type::uniquePyType() const {
     return it->second;
   }
   // Heap types that we're aware of, not statically known
-  if (dropMortality() == TArray) {
-    return PyStaticArray_Type;
+  if constexpr (kStaticPythonEnabled) {
+    if (dropMortality() == TArray) {
+      return PyStaticArray_Type;
+    }
   }
   return nullptr;
 }
@@ -689,10 +699,12 @@ unsigned int Type::sizeInBytes() const {
 }
 
 Type OwnedType::toHir() const {
-  int prim_type = _PyClassLoader_GetTypeCode(type);
-  if (prim_type != TYPED_OBJECT) {
-    JIT_CHECK(!optional, "primitive types cannot be optional");
-    return prim_type_to_type(prim_type);
+  if constexpr (kStaticPythonEnabled) {
+    int prim_type = _PyClassLoader_GetTypeCode(type);
+    if (prim_type != TYPED_OBJECT) {
+      JIT_CHECK(!optional, "primitive types cannot be optional");
+      return prim_type_to_type(prim_type);
+    }
   }
 
   Type hir_type = exact ? Type::fromTypeExact(type) : Type::fromType(type);
