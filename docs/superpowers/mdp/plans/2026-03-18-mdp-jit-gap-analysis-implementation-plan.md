@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.14, pyperformance, CinderX JIT, CPython 3.14 JIT, unittest/pytest, shell scripts, ARM Docker, macOS 本地编译
 
----
+***
 
 ## 文件结构
 
@@ -42,10 +42,10 @@
 ### Task 1: 在本地 pyperformance 矩阵入口中加入 `mdp`
 
 **Files:**
+
 - Modify: `scripts/arm/run_local_pyperf_matrix.py`
 - Test: `cinderx/PythonLib/test_cinderx/test_local_pyperf_driver.py`
-
-- [ ] **Step 1: 为 `mdp` 写失败测试**
+- [ ] **Step 1: 为** **`mdp`** **写失败测试**
 
 在 `cinderx/PythonLib/test_cinderx/test_local_pyperf_driver.py` 新增一个解析 `mdp` benchmark spec 的测试，断言：
 
@@ -63,7 +63,7 @@ assert str(spec["module_path"]).endswith("bm_mdp/run_benchmark.py")
 Run: `python3 -m pytest cinderx/PythonLib/test_cinderx/test_local_pyperf_driver.py -k mdp -v`
 Expected: FAIL with `unsupported benchmark` or missing `mdp` entry
 
-- [ ] **Step 3: 在本地矩阵脚本中加入 `mdp`**
+- [ ] **Step 3: 在本地矩阵脚本中加入** **`mdp`**
 
 在 `scripts/arm/run_local_pyperf_matrix.py` 的 `BENCHMARK_SPECS` 中加入：
 
@@ -90,9 +90,9 @@ git commit -m "diag: add mdp benchmark to local pyperf matrix"
 ### Task 2: 为 `mdp` 归因补足直接跑 benchmark 的导出能力
 
 **Files:**
+
 - Modify: `scripts/arm/bench_pyperf_direct.py`
 - Test: `cinderx/PythonLib/test_cinderx/test_local_pyperf_driver.py`
-
 - [ ] **Step 1: 为新导出字段写失败测试**
 
 在测试中新增一个最小模块夹具，断言直接跑脚本的输出 JSON 中至少包含：
@@ -109,7 +109,7 @@ git commit -m "diag: add mdp benchmark to local pyperf matrix"
 Run: `python3 -m pytest cinderx/PythonLib/test_cinderx/test_local_pyperf_driver.py -k direct_runner -v`
 Expected: FAIL with missing JSON field or missing CLI flag
 
-- [ ] **Step 3: 在 `bench_pyperf_direct.py` 补齐所需导出能力**
+- [ ] **Step 3: 在** **`bench_pyperf_direct.py`** **补齐所需导出能力**
 
 最小实现要求：
 
@@ -143,16 +143,15 @@ git commit -m "diag: enrich direct pyperf runner for mdp analysis"
 ### Task 3: 验证本地构建具备所需 JIT 诊断 API
 
 **Files:**
-- Modify: `scripts/arm/probe_jit_apis.py`
 
-- [ ] **Step 1: 为 `probe_jit_apis.py` 明确输出格式**
+- Modify: `scripts/arm/probe_jit_apis.py`
+- [ ] **Step 1: 为** **`probe_jit_apis.py`** **明确输出格式**
 
 把脚本输出整理成适合人工检查的清单，至少覆盖：
 
 - `get_function_hir_opcode_counts`
 - `get_and_clear_runtime_stats`
 - `print_hir` 或等价 HIR 导出路径
-
 - [ ] **Step 2: 运行脚本确认当前构建状态**
 
 Run: `python3 scripts/arm/probe_jit_apis.py`
@@ -183,12 +182,12 @@ git commit -m "diag: clarify available local JIT probe APIs"
 ### Task 4: 在 macOS 本地采集 `mdp` 归因基线
 
 **Files:**
+
 - Read: `$HOME/Repo/pyperformance/pyperformance/data-files/benchmarks/bm_mdp/run_benchmark.py`
 - Read: `scripts/arm/run_local_pyperf_matrix.py`
 - Read: `scripts/arm/bench_pyperf_direct.py`
 - Create: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
-
-- [ ] **Step 1: 跑一轮 `mdp` 本地近似基线**
+- [ ] **Step 1: 跑一轮** **`mdp`** **本地近似基线**
 
 Run:
 
@@ -210,7 +209,6 @@ Expected: 输出 `mdp` 的本地近似时间、已编译函数与 deopt 聚合
 - 关键热点函数
 - 哪些函数实际进入 JIT
 - 哪些函数拥有明显 deopt 或 HIR 负担
-
 - [ ] **Step 3: 用函数白名单策略缩小关键热点**
 
 Run:
@@ -237,7 +235,6 @@ Expected: 缩小归因范围，确认首批代表热点
 - `Fraction` / `defaultdict` 分布路径
 - 高阶调用链
 - 状态对象流转
-
 - [ ] **Step 5: 提交这一小步**
 
 ```bash
@@ -248,14 +245,14 @@ git commit -m "docs: add initial mdp local attribution report"
 ### Task 5: 固定 `stock CPython JIT` 与当前 `CinderX JIT` 的正式对照
 
 **Files:**
-- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
 
-- [ ] **Step 1: 在 ARM Docker 中跑 `stock CPython 3.14.0 + JIT`**
+- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
+- [ ] **Step 1: 在 ARM Docker 中跑** **`stock CPython 3.14.0 + JIT`**
 
 Run: 使用固定容器环境跑 `mdp`，记录正式时间与环境说明
 Expected: 得到 `stock CPython JIT` 的可引用结果
 
-- [ ] **Step 2: 在 ARM Docker 中跑当前 `CinderX JIT`**
+- [ ] **Step 2: 在 ARM Docker 中跑当前** **`CinderX JIT`**
 
 Run: 使用相同输入与容器口径跑 `mdp`
 Expected: 得到当前 `CinderX JIT` 的正式结果
@@ -285,8 +282,8 @@ git commit -m "docs: add arm baseline comparison for mdp"
 ### Task 6: 为每类问题补齐 HIR 主证据
 
 **Files:**
-- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
 
+- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
 - [ ] **Step 1: 为每类问题挑 1 到 3 个代表函数**
 
 优先从以下函数中选择：
@@ -297,7 +294,6 @@ git commit -m "docs: add arm baseline comparison for mdp"
 - `Battle._getSuccessorsC`
 - `getCritDist`
 - `topoSort`
-
 - [ ] **Step 2: 导出优化前 HIR**
 
 Run: 使用 `PYTHONJITDUMPHIR` / `PYTHONJITDUMPFINALHIR` 或 `print_hir` 路径导出代表函数 HIR
@@ -309,7 +305,6 @@ Expected: 获得可粘贴到报告的精简 HIR 片段
 
 - 当前 HIR 里重在哪里
 - 预期优化后 HIR 应当消失或变轻的指令/路径是什么
-
 - [ ] **Step 4: 对每类问题给出收益优先级**
 
 按：
@@ -332,13 +327,13 @@ git commit -m "docs: add hir evidence and priority ranking for mdp"
 ### Task 7: 锁定第一轮优化目标与文件簇
 
 **Files:**
+
 - Read: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
 - Candidate Modify: `cinderx/Jit/hir/builder.cpp`
 - Candidate Modify: `cinderx/Jit/hir/simplify.cpp`
 - Candidate Modify: `cinderx/Jit/lir/generator.cpp`
 - Candidate Modify: `cinderx/Jit/codegen/gen_asm.cpp`
 - Candidate Modify: `cinderx/Jit/pyjit.cpp`
-
 - [ ] **Step 1: 从报告中选出排名第 1 的劣化类型**
 
 Expected: 选出单一最强根因，不要一上来并行做多个机制
@@ -352,7 +347,6 @@ Expected: 选出单一最强根因，不要一上来并行做多个机制
 - 若是 lowering 过重，优先看 `cinderx/Jit/lir/generator.cpp`
 - 若是最终代码生成过重，优先看 `cinderx/Jit/codegen/gen_asm.cpp`
 - 若需要调试开关或 dump 行为，补看 `cinderx/Jit/pyjit.cpp`
-
 - [ ] **Step 3: 为该根因写最小回归测试**
 
 优先在 `cinderx/PythonLib/test_cinderx/test_arm_runtime.py` 中新增针对性测试，使用：
@@ -379,13 +373,13 @@ git commit -m "test: add mdp jit regression guard"
 ### Task 8: 实现第一轮优化并验证 HIR 改善
 
 **Files:**
+
 - Modify: `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
 - Candidate Modify: `cinderx/Jit/hir/builder.cpp`
 - Candidate Modify: `cinderx/Jit/hir/simplify.cpp`
 - Candidate Modify: `cinderx/Jit/lir/generator.cpp`
 - Candidate Modify: `cinderx/Jit/codegen/gen_asm.cpp`
 - Candidate Modify: `cinderx/Jit/pyjit.cpp`
-
 - [ ] **Step 1: 做最小实现**
 
 只改排名最高的单一根因所涉及文件，不顺手夹带其他优化。
@@ -425,9 +419,9 @@ git commit -m "jit: optimize primary mdp regression path"
 ### Task 9: ARM Docker 正式复核与报告收尾
 
 **Files:**
-- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
 
-- [ ] **Step 1: 在 ARM Docker 中复跑优化后的 `CinderX JIT`**
+- Modify: `docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md`
+- [ ] **Step 1: 在 ARM Docker 中复跑优化后的** **`CinderX JIT`**
 
 Expected: 获得正式 `mdp` 结果
 
@@ -451,17 +445,16 @@ Expected: 获得正式 `mdp` 结果
 - 优化后 HIR 片段
 - 变化说明
 - 与性能结果的对应关系
-
 - [ ] **Step 4: 给出是否达到目标的结论**
 
 明确回答：
 
 - 是否持平 `1.04s`
 - 若未持平，还差哪一类问题最值得继续做
-
 - [ ] **Step 5: 提交报告**
 
 ```bash
 git add docs/superpowers/mdp/reports/2026-03-18-mdp-jit-gap-analysis-report.md
 git commit -m "docs: finalize mdp jit gap analysis report"
 ```
+
