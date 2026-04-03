@@ -2699,9 +2699,11 @@ void HIRBuilder::emitAnyCall(
     jit::BytecodeInstructionBlock::Iterator& bc_it,
     const jit::BytecodeInstructionBlock& bc_instrs) {
   BytecodeInstruction bc_instr = *bc_it;
+#if PY_VERSION_HEX >= 0x030E0000 && PY_VERSION_HEX < 0x030F0000
   if (tryInlineAnyGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
     return;
   }
+#endif
   if (tryInlineSetGenexprCall(irfunc, cfg, tc, bc_it, bc_instrs)) {
     return;
   }

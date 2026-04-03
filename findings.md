@@ -4706,3 +4706,69 @@ Conclusion:
     - current evidence supports the narrowed OSS statement:
       - `3.14.x` is the supported family
       - `3.14.3` is the default build/release baseline, not the only validated patch
+
+- 2026-04-03 implementation + validation: onboarding `3.15`
+  - code and policy changes:
+    - `cinderx/PythonLib/cinderx/_compat.py`
+      - registered `3.15` as an OSS-supported family
+      - current validated baseline recorded as `3.15.0a6+`
+      - no ARM-only default features enabled for `3.15`
+    - `cinderx/PythonLib/cinderx/__init__.py`
+      - runtime support gate now accepts `3.15`
+    - `pyproject.toml`
+      - widened `requires-python` back to `>= 3.14.0, < 3.16`
+      - added `Programming Language :: Python :: 3.15`
+      - enabled `cp315` wheel targets in cibuildwheel config
+    - `README.md`
+      - updated support statement to mention `3.14.x and 3.15`
+    - `cinderx/Jit/hir/builder.h`
+    - `cinderx/Jit/hir/builder.cpp`
+      - gated `tryInlineAnyGenexprCall()` declaration/call site off for `PY_VERSION_HEX >= 0x030F0000`
+      - root cause:
+        - `3.15` build was leaving an undefined symbol because the definition stayed under `< 0x030F0000` while the declaration/call site remained unconditional
+    - `cinderx/Interpreter/3.15/binary_slice_compat.c`
+    - `cinderx/UpstreamBorrow/borrowed.h`
+      - added local compatibility wrappers for `_PyList_BinarySlice`, `_PyTuple_BinarySlice`, `_PyUnicode_BinarySlice`
+      - root cause:
+        - current `3.15` validation runtime lacked those symbols even though the checked-in generated interpreter cases referred to them
+    - `cinderx/UpstreamBorrow/borrowed-3.15.gen_cached.c`
+      - removed dependency on `tstate->datastack_cached_chunk` in `push_chunk()`
+      - root cause:
+        - current `3.15` validation runtime did not expose that field in `PyThreadState`
+  - local verification (Windows host):
+    - command:
+      - `uv run --python 3.12 --no-project --with pytest --with setuptools python -m pytest tests/test_compat_policy.py tests/test_setup_adaptive_static_python.py tests/test_setup_lightweight_frames.py tests/test_runtime_support_policy.py tests/test_project_metadata.py tests/test_remote_entrypoint_contract.py -q`
+    - result:
+      - `26 passed`
+      - `10 subtests passed`
+  - isolated remote `3.15` environment:
+    - runtime source:
+      - `/opt/python-3.15/bin/python3.15`
+      - version: `Python 3.15.0a6+`
+    - isolated build venv:
+      - `/root/venv-cinderx315-build`
+    - isolated driver venv:
+      - `/root/venv-cinderx315-compat`
+    - isolated workdir:
+      - `/root/work/cinderx315-compat`
+    - impact note:
+      - did not modify the shared `3.14` baseline interpreter or driver venv
+  - remote build verification:
+    - successful manual wheel build in isolated workdir:
+      - `/root/work/cinderx315-compat/dist/cinderx-2026.4.3.0-cp315-cp315-linux_aarch64.whl`
+    - successful isolated install:
+      - `pip install --force-reinstall dist/cinderx-2026.4.3.0-cp315-cp315-linux_aarch64.whl`
+    - direct import check:
+      - `cinderx.is_initialized() == True`
+      - `cinderx.get_import_error() == None`
+    - targeted pytest in isolated `3.15` driver venv:
+      - result:
+        - `28 passed`
+        - `10 subtests passed`
+  - unified remote entrypoint note:
+    - the updated entrypoint was still used as the primary transport/build harness for `3.15`
+    - however, end-to-end `remote_update_build_test.sh` returned non-zero in the `3.15` compatibility-only scenario even after the build artifacts were produced
+    - the isolated manual install + pytest run in the same `3.15` environment passed
+    - interpretation:
+      - current evidence supports `3.15` code/runtime compatibility
+      - there is likely still a harness-level issue in the `3.15` compatibility-only path of `remote_update_build_test.sh`

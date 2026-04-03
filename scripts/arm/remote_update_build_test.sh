@@ -66,7 +66,7 @@ run_extra_cmd() {
     return 0
   fi
   echo ">> $label"
-  env WORKDIR="$WORKDIR" DRIVER_VENV="$DRIVER_VENV" PYTHON="$DRIVER_VENV/bin/python" \
+  env WORKDIR="$WORKDIR" DRIVER_VENV="$DRIVER_VENV" VIRTUAL_ENV="$DRIVER_VENV" PATH="$DRIVER_VENV/bin:$PATH" PYTHON="$DRIVER_VENV/bin/python" \
     bash -lc "cd '$WORKDIR' && $cmd"
 }
 
@@ -95,6 +95,15 @@ echo ">> install wheel + pyperformance into driver venv"
 . "$DRIVER_VENV/bin/activate"
 PYTHONJIT=0 python -m pip install -q -U pip
 PYTHONJIT=0 python -m pip install -q --force-reinstall "$WHEEL"
+
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" && "$SKIP_PYPERF" == "1" ]]; then
+  deactivate
+  run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
+  run_extra_cmd "extra verification command" "$EXTRA_VERIFY_CMD"
+  echo "compatibility-only validation requested; skipping pyperformance install, setup, and smoke."
+  exit 0
+fi
+
 PYTHONJIT=0 python -m pip install -q -U pyperformance
 
 if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" ]]; then
@@ -207,11 +216,6 @@ fi
 
 run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
 run_extra_cmd "extra verification command" "$EXTRA_VERIFY_CMD"
-
-if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" && "$SKIP_PYPERF" == "1" ]]; then
-  echo "compatibility-only validation requested; skipping pyperformance setup and smoke."
-  exit 0
-fi
 
 echo ">> ensure pyperformance venv exists"
 . "$DRIVER_VENV/bin/activate"

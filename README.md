@@ -24,12 +24,13 @@ However these features are not compatible with the stock CPython runtime yet.
 
 ## Requirements
 
-- CPython 3.14.x
+- CPython 3.14.x and 3.15
 - Linux (x86_64)
 - GCC 13+ or Clang 18+
 
 The OSS build is currently validated against CPython `3.14.0` through
-`3.14.3`. We use CPython `3.14.3` as the default build and release baseline,
+`3.14.3`, plus the currently provisioned `3.15` validation baseline.
+We use CPython `3.14.3` as the default `3.14.x` build and release baseline,
 but it is not the only supported `3.14.x` patch release.
 
 The extension should build and import on macOS but most features will be

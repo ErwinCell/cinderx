@@ -297,6 +297,10 @@ if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 
   if (${ENABLE_INTERPRETER_LOOP})
     set(INTERP_SOURCES ${INTERP_SOURCES} ${PROJECT_SOURCE_DIR}/Interpreter/${PY_VERSION}/interpreter.c)
   endif()
+
+  if (${PY_VERSION} EQUAL 3.15)
+    list(APPEND INTERP_SOURCES ${PROJECT_SOURCE_DIR}/Interpreter/3.15/binary_slice_compat.c)
+  endif()
 endif()
 
 # Generate cinderx/Interpreter header files.

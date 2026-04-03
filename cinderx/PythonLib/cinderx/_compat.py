@@ -15,7 +15,7 @@ class FamilyPolicy:
     arm64_enabled_features: frozenset[str]
 
 
-OSS_SUPPORTED_MINOR_FAMILIES = ("3.14",)
+OSS_SUPPORTED_MINOR_FAMILIES = ("3.14", "3.15")
 
 _FAMILY_POLICIES: dict[str, FamilyPolicy] = {
     "3.14": FamilyPolicy(
@@ -26,6 +26,13 @@ _FAMILY_POLICIES: dict[str, FamilyPolicy] = {
         arm64_enabled_features=frozenset(
             {"adaptive_static_python", "lightweight_frames"}
         ),
+    ),
+    "3.15": FamilyPolicy(
+        minor="3.15",
+        validated_patches=("3.15.0a6+",),
+        default_build_patch="3.15.0a6+",
+        publish_wheels=True,
+        arm64_enabled_features=frozenset(),
     ),
 }
 
