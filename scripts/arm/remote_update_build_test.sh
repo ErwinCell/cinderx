@@ -16,6 +16,7 @@ AUTOJIT="${AUTOJIT:-50}"
 SMOKE_AUTOJIT="${SMOKE_AUTOJIT:-10}"
 PARALLEL="${PARALLEL:-1}"
 SKIP_PYPERF="${SKIP_PYPERF:-0}"
+SKIP_ARM_RUNTIME_VALIDATION="${SKIP_ARM_RUNTIME_VALIDATION:-0}"
 SKIP_DEFAULT_PYPERF_GATES="${SKIP_DEFAULT_PYPERF_GATES:-0}"
 RECREATE_PYPERF_VENV="${RECREATE_PYPERF_VENV:-0}"
 AUTOJIT_GATE="${AUTOJIT_GATE:-$AUTOJIT}"
@@ -47,6 +48,10 @@ if [[ "$CINDERX_ENABLE_SPECIALIZED_OPCODES" != "0" && "$CINDERX_ENABLE_SPECIALIZ
 fi
 if [[ "$SKIP_DEFAULT_PYPERF_GATES" != "0" && "$SKIP_DEFAULT_PYPERF_GATES" != "1" ]]; then
   echo "ERROR: SKIP_DEFAULT_PYPERF_GATES must be 0 or 1, got '$SKIP_DEFAULT_PYPERF_GATES'"
+  exit 1
+fi
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" != "0" && "$SKIP_ARM_RUNTIME_VALIDATION" != "1" ]]; then
+  echo "ERROR: SKIP_ARM_RUNTIME_VALIDATION must be 0 or 1, got '$SKIP_ARM_RUNTIME_VALIDATION'"
   exit 1
 fi
 
@@ -92,11 +97,14 @@ PYTHONJIT=0 python -m pip install -q -U pip
 PYTHONJIT=0 python -m pip install -q --force-reinstall "$WHEEL"
 PYTHONJIT=0 python -m pip install -q -U pyperformance
 
-echo ">> unittest: ARM runtime checks"
-if [[ -z "$ARM_RUNTIME_SKIP_TESTS" ]]; then
-  python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" ]]; then
+  echo "SKIP_ARM_RUNTIME_VALIDATION=1 set; skipping built-in ARM runtime checks and JIT effectiveness smoke."
 else
-  env ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" python - <<'PY'
+  echo ">> unittest: ARM runtime checks"
+  if [[ -z "$ARM_RUNTIME_SKIP_TESTS" ]]; then
+    python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+  else
+    env ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" python - <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -148,15 +156,13 @@ result = runner.run(filtered)
 if not result.wasSuccessful():
     raise SystemExit(1)
 PY
-fi
+  fi
 
-run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
-
-echo ">> smoke: JIT is effective (compiled code executes, not just 'enabled')"
-# We verify effectiveness by:
-# 1) Run a function in interpreted mode and observe interpreted call count increases.
-# 2) Force-compile it and observe the interpreted call count stops increasing while the function still runs.
-env PYTHONJITAUTO=1000000 python - <<'PY'
+  echo ">> smoke: JIT is effective (compiled code executes, not just 'enabled')"
+  # We verify effectiveness by:
+  # 1) Run a function in interpreted mode and observe interpreted call count increases.
+  # 2) Force-compile it and observe the interpreted call count stops increasing while the function still runs.
+  env PYTHONJITAUTO=1000000 python - <<'PY'
 import cinderx
 import cinderx.jit as jit
 
@@ -196,9 +202,16 @@ assert interp1 == interp0, (interp0, interp1)
 
 print("jit-effective-ok", "compiled_size", code_size, "interp_calls", interp1)
 PY
-deactivate
+  deactivate
+fi
 
+run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
 run_extra_cmd "extra verification command" "$EXTRA_VERIFY_CMD"
+
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" && "$SKIP_PYPERF" == "1" ]]; then
+  echo "compatibility-only validation requested; skipping pyperformance setup and smoke."
+  exit 0
+fi
 
 echo ">> ensure pyperformance venv exists"
 . "$DRIVER_VENV/bin/activate"

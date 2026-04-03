@@ -31,7 +31,11 @@ param(
   [int]$CmakeParallel = 1,
 
   [switch]$SkipPyperformance,
-  [switch]$RecreatePyperfVenv
+  [switch]$SkipArmRuntimeValidation,
+  [switch]$RecreatePyperfVenv,
+
+  [string]$ExtraTestCmd = "",
+  [string]$ExtraVerifyCmd = ""
 )
 
 Set-StrictMode -Version Latest
@@ -48,6 +52,12 @@ function ExecPwsh {
   param([string]$Cmd)
   Write-Host ">> $Cmd"
   Invoke-Expression $Cmd
+}
+
+function QuoteForPosixShell {
+  param([string]$Value)
+  $singleQuoteEscape = "'" + '"' + "'" + '"' + "'"
+  return "'" + (($Value -split "'") -join $singleQuoteEscape) + "'"
 }
 
 if (-not (Test-Path $RepoPath)) {
@@ -110,19 +120,26 @@ try {
   Exec ("ssh {0} {1}@{2} `"tr -d '\r' < {3}/remote_update_build_test.sh > {3}/remote_update_build_test.sh.lf && mv {3}/remote_update_build_test.sh.lf {3}/remote_update_build_test.sh`"" -f $sshOpts, $User, $ArmHost, $RemoteIncomingDir)
 
   $skip = $(if ($SkipPyperformance) { 1 } else { 0 })
+  $skipRuntimeValidation = $(if ($SkipArmRuntimeValidation) { 1 } else { 0 })
   $recreate = $(if ($RecreatePyperfVenv) { 1 } else { 0 })
 
-  $envPrefix = @(
-    "INCOMING_DIR=$RemoteIncomingDir",
-    "WORKDIR=$RemoteWorkDir",
-    "PYTHON=$RemotePython",
-    "DRIVER_VENV=$RemoteDriverVenv",
-    "BENCH=$Benchmark",
-    "AUTOJIT=$AutoJit",
-    "PARALLEL=$CmakeParallel",
-    "SKIP_PYPERF=$skip",
-    "RECREATE_PYPERF_VENV=$recreate"
-  ) -join " "
+  $remoteEnv = [ordered]@{
+    INCOMING_DIR = $RemoteIncomingDir
+    WORKDIR = $RemoteWorkDir
+    PYTHON = $RemotePython
+    DRIVER_VENV = $RemoteDriverVenv
+    BENCH = $Benchmark
+    AUTOJIT = [string]$AutoJit
+    PARALLEL = [string]$CmakeParallel
+    SKIP_PYPERF = [string]$skip
+    SKIP_ARM_RUNTIME_VALIDATION = [string]$skipRuntimeValidation
+    RECREATE_PYPERF_VENV = [string]$recreate
+    EXTRA_TEST_CMD = $ExtraTestCmd
+    EXTRA_VERIFY_CMD = $ExtraVerifyCmd
+  }
+  $envPrefix = ($remoteEnv.GetEnumerator() | ForEach-Object {
+    "{0}={1}" -f $_.Key, (QuoteForPosixShell ([string]$_.Value))
+  }) -join " "
 
   $runCmd = @(
     "chmod +x $RemoteIncomingDir/remote_update_build_test.sh",

@@ -9,6 +9,7 @@
 
 import datetime
 import glob
+import importlib.util
 import os
 import os.path
 import platform
@@ -134,6 +135,30 @@ def compute_py_version() -> str:
     return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
+@lru_cache(maxsize=1)
+def load_compat_module():
+    compat_path = os.path.join(CHECKOUT_ROOT_DIR, PYTHON_LIB_DIR, "cinderx", "_compat.py")
+    spec = importlib.util.spec_from_file_location("cinderx_compat", compat_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load compatibility policy from {compat_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def get_family_policy(py_version: str):
+    return load_compat_module().get_family_policy(py_version)
+
+
+def is_supported_oss_minor(py_version: str) -> bool:
+    return get_family_policy(py_version) is not None
+
+
+def is_oss_feature_enabled(py_version: str, machine: str, feature: str) -> bool:
+    return load_compat_module().is_oss_feature_enabled(py_version, machine, feature)
+
+
 def should_enable_adaptive_static_python(
     py_version: str,
     meta_python: bool,
@@ -142,11 +167,13 @@ def should_enable_adaptive_static_python(
     if meta_python and py_version == "3.12":
         return True
 
+    if not is_supported_oss_minor(py_version):
+        return False
+
     if machine is None:
         machine = platform.machine()
-    machine = machine.lower()
 
-    return py_version == "3.14" and machine in {"aarch64", "arm64"}
+    return is_oss_feature_enabled(py_version, machine, "adaptive_static_python")
 
 
 def should_enable_lightweight_frames(
@@ -157,14 +184,16 @@ def should_enable_lightweight_frames(
     if meta_python and py_version == "3.12":
         return True
 
+    if not is_supported_oss_minor(py_version):
+        return False
+
     if machine is None:
         machine = platform.machine()
-    machine = machine.lower()
 
     # Stage A rollout:
     # - keep existing meta 3.12 behavior
     # - enable by default for OSS 3.14 ARM only
-    return py_version == "3.14" and machine in {"aarch64", "arm64"}
+    return is_oss_feature_enabled(py_version, machine, "lightweight_frames")
 
 
 def is_env_flag_enabled(var: str, default: bool = False) -> bool:
