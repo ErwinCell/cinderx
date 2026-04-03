@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import textwrap
 from enum import Enum
 from functools import lru_cache
 from typing import Callable
@@ -32,6 +33,27 @@ SOURCE_DIR = "cinderx"
 PYTHON_LIB_DIR = "cinderx/PythonLib"
 
 MIN_GCC_VERSION = 13
+GCC_PGO_AUDITED_TARGETS = {
+    "_cinderx": os.path.join("CMakeFiles", "_cinderx.dir"),
+    "borrowed": os.path.join("CMakeFiles", "borrowed.dir"),
+    "cached-properties": os.path.join("CMakeFiles", "cached-properties.dir"),
+    "common": os.path.join("CMakeFiles", "common.dir"),
+    "immortalize": os.path.join("CMakeFiles", "immortalize.dir"),
+    "interpreter": os.path.join("CMakeFiles", "interpreter.dir"),
+    "jit": os.path.join("CMakeFiles", "jit.dir"),
+    "parallel-gc": os.path.join("CMakeFiles", "parallel-gc.dir"),
+    "static-python": os.path.join("CMakeFiles", "static-python.dir"),
+}
+GCC_PGO_REQUIRED_TARGETS = {
+    "_cinderx": os.path.join("CMakeFiles", "_cinderx.dir"),
+    "interpreter": os.path.join("CMakeFiles", "interpreter.dir"),
+    "jit": os.path.join("CMakeFiles", "jit.dir"),
+}
+GCC_PGO_IGNORED_PROFILE_SUFFIXES = (
+    os.path.join("cinderx", "Jit", "codegen", "arch", "unknown.cpp.gcda"),
+    os.path.join("cinderx", "Jit", "codegen", "arch", "x86_64.cpp.gcda"),
+    os.path.join("generated", "dummy-parallel-gc.c.gcda"),
+)
 
 
 def compute_package_version() -> str:
@@ -182,6 +204,147 @@ def is_env_flag_enabled(var: str, default: bool = False) -> bool:
     return True
 
 
+def validate_pgo_runtime(cinderx_module: object) -> None:
+    import_error_getter = getattr(cinderx_module, "get_import_error", None)
+    if not callable(import_error_getter):
+        raise RuntimeError(
+            "PGO workload validation failed: cinderx.get_import_error() is unavailable"
+        )
+
+    import_error = import_error_getter()
+    if import_error is not None:
+        raise RuntimeError(
+            "PGO workload validation failed: _cinderx failed to import: "
+            f"{import_error!r}"
+        )
+
+    is_initialized = getattr(cinderx_module, "is_initialized", None)
+    if not callable(is_initialized):
+        raise RuntimeError(
+            "PGO workload validation failed: cinderx.is_initialized() is unavailable"
+        )
+
+    if not is_initialized():
+        raise RuntimeError(
+            "PGO workload validation failed: cinderx imported but _cinderx did not initialize"
+        )
+
+
+def build_pgo_workload_command() -> list[str]:
+    workload_script = textwrap.dedent(
+        """
+        import sys
+
+        import cinderx
+        from setup import validate_pgo_runtime
+
+        validate_pgo_runtime(cinderx)
+        sys.argv.append("--pgo")
+
+        def main():
+            # This import must not be in the module body as it will start the tests
+            # running, and those using multiprocessing will fail because the initial
+            # process does not have "freeze support".
+            import test.__main__
+
+        if __name__ == "__main__":
+            main()
+        """
+    )
+    return [sys.executable, "-c", workload_script]
+
+
+def collect_gcc_pgo_profile_counts(
+    build_temp: str,
+    required_targets: dict[str, str] | None = None,
+) -> dict[str, int]:
+    required_targets = required_targets or GCC_PGO_REQUIRED_TARGETS
+    profile_counts = {}
+
+    for target, relative_dir in required_targets.items():
+        gcda_count = 0
+        target_dir = os.path.join(build_temp, relative_dir)
+        if os.path.isdir(target_dir):
+            for root, _dirs, files in os.walk(target_dir):
+                gcda_count += sum(1 for file_name in files if file_name.endswith(".gcda"))
+        profile_counts[target] = gcda_count
+
+    return profile_counts
+
+
+def collect_gcc_pgo_missing_profile_files(
+    build_temp: str,
+    audited_targets: dict[str, str] | None = None,
+) -> dict[str, list[str]]:
+    audited_targets = audited_targets or GCC_PGO_AUDITED_TARGETS
+    missing_profiles = {}
+
+    for target, relative_dir in audited_targets.items():
+        missing_target_profiles = []
+        target_dir = os.path.join(build_temp, relative_dir)
+        if os.path.isdir(target_dir):
+            for root, _dirs, files in os.walk(target_dir):
+                existing_files = set(files)
+                for file_name in files:
+                    if not file_name.endswith(".o"):
+                        continue
+                    expected_gcda = file_name[:-2] + ".gcda"
+                    if expected_gcda in existing_files:
+                        continue
+                    expected_gcda_path = os.path.join(root, expected_gcda)
+                    normalized_path = os.path.normpath(expected_gcda_path)
+                    if any(
+                        normalized_path.endswith(os.path.normpath(suffix))
+                        for suffix in GCC_PGO_IGNORED_PROFILE_SUFFIXES
+                    ):
+                        continue
+                    missing_target_profiles.append(expected_gcda_path)
+        if missing_target_profiles:
+            missing_profiles[target] = sorted(missing_target_profiles)
+
+    return missing_profiles
+
+
+def require_gcc_pgo_profiles(
+    build_temp: str,
+    profile_counts: dict[str, int],
+    missing_profile_files: dict[str, list[str]] | None = None,
+    required_targets: dict[str, str] | None = None,
+) -> None:
+    required_targets = required_targets or GCC_PGO_REQUIRED_TARGETS
+    audit_failures = []
+
+    missing_targets = []
+
+    for target, relative_dir in required_targets.items():
+        if profile_counts.get(target, 0) == 0:
+            target_dir = os.path.join(build_temp, relative_dir)
+            missing_targets.append(f"{target} ({target_dir})")
+
+    if missing_targets:
+        audit_failures.append(
+            "missing .gcda files for required targets: " + ", ".join(missing_targets)
+        )
+
+    if missing_profile_files:
+        missing_object_profiles = []
+        for target, file_paths in sorted(missing_profile_files.items()):
+            sample_paths = ", ".join(file_paths[:3])
+            if len(file_paths) > 3:
+                sample_paths = f"{sample_paths}, ..."
+            missing_object_profiles.append(
+                f"{target} ({len(file_paths)} missing, e.g. {sample_paths})"
+            )
+        if missing_object_profiles:
+            audit_failures.append(
+                "missing per-object profile files: "
+                + "; ".join(missing_object_profiles)
+            )
+
+    if audit_failures:
+        raise RuntimeError("GCC PGO profile audit failed: " + " | ".join(audit_failures))
+
+
 def run_pgo_workload(workload_cmd: list[str], workload_args: dict[str, object]) -> None:
     # CPython's --pgo test workload can fail intermittently; retry once to
     # avoid aborting an otherwise healthy instrumented build on a flaky run.
@@ -248,33 +411,14 @@ class BuildCommand(build):
 
         # Add build output to PYTHONPATH so workload can import cinderx
         cinderx_so_dir = os.path.join(os.getcwd(), self.build_lib)
-        if "PYTHONPATH" in workload_env:
-            workload_env["PYTHONPATH"] = (
-                f"{cinderx_so_dir}:{workload_env['PYTHONPATH']}"
-            )
-        else:
-            workload_env["PYTHONPATH"] = cinderx_so_dir
+        pythonpath_entries = [cinderx_so_dir, CHECKOUT_ROOT_DIR]
+        existing_pythonpath = workload_env.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath_entries.append(existing_pythonpath)
+        workload_env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
-        # Uses the same default workload as CPython's PGO
-        workload_cmd = [
-            sys.executable,
-            "-c",
-            """
-import cinderx
-
-import sys
-sys.argv.append("--pgo")
-
-def main():
-    # This import must not be in the module body as it will start the tests
-    # running, and those using multiprocessing will fail because the initial
-    # doesn't have "freeze support".
-    import test.__main__
-
-if __name__ == "__main__":
-    main()
-            """,
-        ]
+        # Uses the same default workload as CPython's PGO.
+        workload_cmd = build_pgo_workload_command()
 
         print(f"Running workload with PYTHONPATH={workload_env['PYTHONPATH']}")
         workload_args = {
@@ -307,6 +451,28 @@ if __name__ == "__main__":
             ] + profraw_files
             subprocess.run(merge_cmd, check=True)
             print(f"Merged profile written to {clang_merged_profile}")
+        else:
+            print_section("PGO STAGE 2b: Auditing GCC profile data")
+            build_temp_dir = os.path.join(os.getcwd(), self.build_temp)
+            profile_counts = collect_gcc_pgo_profile_counts(
+                build_temp_dir,
+                GCC_PGO_AUDITED_TARGETS,
+            )
+            missing_profile_files = collect_gcc_pgo_missing_profile_files(
+                build_temp_dir,
+                GCC_PGO_AUDITED_TARGETS,
+            )
+            for target, count in profile_counts.items():
+                missing_count = len(missing_profile_files.get(target, []))
+                print(
+                    f"  {target}: found {count} .gcda files, "
+                    f"missing {missing_count} expected profiles"
+                )
+            require_gcc_pgo_profiles(
+                build_temp_dir,
+                profile_counts,
+                missing_profile_files,
+            )
 
         print_section("PGO STAGE 3/3: Rebuilding with profile-guided optimizations")
 
