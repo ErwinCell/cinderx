@@ -37,12 +37,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SHARED_FLAGS "-DPy_BUILD_CORE -DPy_BUILD_CORE_MODULE -fPIC -Wall -Wextra -Wno-attributes -Wno-c99-designator -Wno-c++11-narrowing -Wno-cast-function-type -Wno-cast-function-type-mismatch -Wno-deprecated-declarations -Wno-missing-field-initializers -Wno-null-pointer-subtraction -Wno-parentheses -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-function -Wno-unused-parameter")
 
-option(ENABLE_STATIC_PYTHON "Enable Static Python features" ON)
-if(NOT ENABLE_STATIC_PYTHON AND ENABLE_ADAPTIVE_STATIC_PYTHON)
-  message(WARNING "ENABLE_STATIC_PYTHON=OFF forces ENABLE_ADAPTIVE_STATIC_PYTHON=OFF")
-  set(ENABLE_ADAPTIVE_STATIC_PYTHON OFF)
-endif()
-
 macro(set_flag VAR)
   if(DEFINED ${VAR})
     if(${VAR})
@@ -52,7 +46,6 @@ macro(set_flag VAR)
 endmacro()
 
 set_flag(ENABLE_ADAPTIVE_STATIC_PYTHON)
-set_flag(ENABLE_STATIC_PYTHON)
 set_flag(ENABLE_DISASSEMBLER)
 set_flag(ENABLE_ELF_READER)
 set_flag(ENABLE_EVAL_HOOK)
@@ -66,10 +59,6 @@ set_flag(ENABLE_PEP523_HOOK)
 set_flag(ENABLE_PERF_TRAMPOLINE)
 set_flag(ENABLE_SYMBOLIZER)
 set_flag(ENABLE_USDT)
-
-if(ENABLE_STATIC_PYTHON)
-  set(SHARED_FLAGS "-DCINDER_ENABLE_STATIC_PYTHON ${SHARED_FLAGS}")
-endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SHARED_FLAGS}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
@@ -172,12 +161,11 @@ include(FetchContent)
 
 find_package(
   Python ${PY_VERSION} EXACT
-  COMPONENTS Interpreter Development.Module Development.Embed
+  COMPONENTS Interpreter Development.Module
   REQUIRED)
 
 # Some of our files are partially generated from CPython source, and they
 # expect to be able to include files relative to Include/internal.
-set(Python_INCLUDE_DIRS ${Python_INCLUDE_DIRS} "${Python_INCLUDE_DIRS}/internal")
 
 ########################################
 # asmjit
@@ -257,8 +245,10 @@ if(BUILD_RUNTIME_TESTS)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(googletest)
-  find_package(Threads REQUIRED)
+  find_package(Python ${PY_VERSION} EXACT COMPONENTS Development.Embed REQUIRED)
 endif()
+list(GET Python_INCLUDE_DIRS 0 PYTHON_PRIMARY_INCLUDE_DIR)
+list(APPEND Python_INCLUDE_DIRS "${PYTHON_PRIMARY_INCLUDE_DIR}/internal")
 
 ##############################################################################
 # Build cinderx
@@ -381,10 +371,10 @@ endif()
 add_library(parallel-gc ${PARALLEL_GC_SOURCES})
 
 ########################################
-# _cinderx internal support
+# _cinderx.cpp
 
-set(CINDERX_INTERNAL_SOURCES
-  # Manually listed out to not accidentally include stuff in .git.
+set(SOURCES
+  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
   ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
   ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
   ${PROJECT_SOURCE_DIR}/module_state.cpp
@@ -392,28 +382,13 @@ set(CINDERX_INTERNAL_SOURCES
   ${PROJECT_SOURCE_DIR}/python_runtime.cpp
 )
 
-add_library(cinderx-runtime-support STATIC ${CINDERX_INTERNAL_SOURCES})
-target_link_libraries(
-  cinderx-runtime-support
-  PUBLIC
-  Python::Python
-  borrowed cached-properties common immortalize interpreter jit parallel-gc static-python
-  asmjit::asmjit fmt::fmt)
-
-########################################
-# _cinderx.cpp
-
-set(SOURCES
-  ${PROJECT_SOURCE_DIR}/_cinderx.cpp
-)
-
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
-
 target_link_libraries(
   ${PROJECT_NAME}
   PRIVATE
   Python::Module
-  cinderx-runtime-support)
+  borrowed cached-properties common immortalize interpreter jit parallel-gc static-python
+  asmjit::asmjit fmt::fmt)
 
 # macOS doesn't allow depending on other shared libraries by default.
 if (${MACOS})

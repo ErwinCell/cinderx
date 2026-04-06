@@ -1,28 +1,31 @@
-file(GLOB RUNTIME_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
-file(GLOB RUNTIME_TEST_HIR_INPUTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hir_tests/*.txt)
+# RuntimeTests/CMakeLists.txt
 
-set(RUNTIME_TESTS_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
-set(RUNTIME_TESTS_WORKING_DIR ${RUNTIME_TESTS_BINARY_DIR}/runtime_test_root)
-set(RUNTIME_TESTS_HIR_DIR ${RUNTIME_TESTS_WORKING_DIR}/RuntimeTests/hir_tests)
-file(MAKE_DIRECTORY ${RUNTIME_TESTS_HIR_DIR})
+file(GLOB RUNTIME_TEST_CASE_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cpp
+)
 
-foreach(HIR_TEST_FILE IN LISTS RUNTIME_TEST_HIR_INPUTS)
-  get_filename_component(HIR_TEST_NAME ${HIR_TEST_FILE} NAME)
-  file(READ ${HIR_TEST_FILE} HIR_TEST_CONTENTS)
-  string(REPLACE "\r\n" "\n" HIR_TEST_CONTENTS "${HIR_TEST_CONTENTS}")
-  file(WRITE ${RUNTIME_TESTS_HIR_DIR}/${HIR_TEST_NAME} "${HIR_TEST_CONTENTS}")
-endforeach()
+set(RUNTIME_TEST_SUPPORT_SOURCES
+  ${PROJECT_SOURCE_DIR}/_cinderx-lib.cpp
+  ${PROJECT_SOURCE_DIR}/async_lazy_value.cpp
+  ${PROJECT_SOURCE_DIR}/module_state.cpp
+  ${PROJECT_SOURCE_DIR}/module_c_state.cpp
+  ${PROJECT_SOURCE_DIR}/python_runtime.cpp
+)
 
-add_executable(RuntimeTests ${RUNTIME_TEST_SOURCES})
+set(RUNTIME_TEST_COMMON_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/testutil.cpp
+)
+
+add_library(runtime-tests-support STATIC
+  ${RUNTIME_TEST_SUPPORT_SOURCES}
+)
 
 target_link_libraries(
-  RuntimeTests
-  PRIVATE
+  runtime-tests-support
+  PUBLIC
   Python::Python
-  Threads::Threads
-  GTest::gtest
-  asmjit::asmjit
-  fmt::fmt
   borrowed
   cached-properties
   common
@@ -31,15 +34,57 @@ target_link_libraries(
   jit
   parallel-gc
   static-python
-  cinderx-runtime-support)
+  asmjit::asmjit
+  fmt::fmt
+  ZLIB::ZLIB
+)
 
-target_compile_definitions(
+target_include_directories(
+  runtime-tests-support
+  PUBLIC
+  ${PROJECT_SOURCE_DIR}/..
+  ${GENERATED_HEADER_DIR}
+  ${Python_INCLUDE_DIRS}
+)
+
+find_package(Threads REQUIRED)
+
+add_executable(RuntimeTests
+  ${RUNTIME_TEST_CASE_SOURCES}
+  ${RUNTIME_TEST_COMMON_SOURCES}
+)
+
+target_link_libraries(
   RuntimeTests
   PRIVATE
-  BAKED_IN_PYTHONPATH="${CINDERX_SOURCE_DIR}/PythonLib")
+  runtime-tests-support
+  Python::Python
+  GTest::gtest
+  GTest::gtest_main
+  Threads::Threads
+)
 
-enable_testing()
-add_test(
-  NAME RuntimeTests
-  COMMAND RuntimeTests --gtest_color=yes
-  WORKING_DIRECTORY ${RUNTIME_TESTS_WORKING_DIR})
+target_include_directories(
+  RuntimeTests
+  PRIVATE
+  ${PROJECT_SOURCE_DIR}/..
+  ${GENERATED_HEADER_DIR}
+  ${Python_INCLUDE_DIRS}
+)
+
+set_target_properties(
+  RuntimeTests
+  PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+set(RUNTIME_TEST_ROOT ${CMAKE_CURRENT_BINARY_DIR}/runtime_test_root)
+
+add_custom_command(
+  TARGET RuntimeTests
+  POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${RUNTIME_TEST_ROOT}
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_CURRENT_SOURCE_DIR}/hir_tests
+          ${RUNTIME_TEST_ROOT}/hir_tests
+)
