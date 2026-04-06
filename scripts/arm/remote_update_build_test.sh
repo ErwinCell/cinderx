@@ -264,7 +264,7 @@ if [[ -z "$PYVENV_PATH" || ! -d "$PYVENV_PATH" ]]; then
 fi
 if [[ "$PYPERF_REQUIRE_SYSTEM_SITE_PACKAGES" == "1" ]]; then
   echo ">> normalize pyperformance venv to include system site-packages"
-  python - <<'PY' "$PYVENV_PATH/pyvenv.cfg"
+  python - "$PYVENV_PATH/pyvenv.cfg" <<'PY'
 from pathlib import Path
 import sys
 
@@ -375,7 +375,7 @@ MAIN_COMPILE_COUNT="$(grep -c "Finished compiling __main__:" "$LOG" || true)"
 TOTAL_COMPILE_COUNT="$(grep -c "Finished compiling " "$LOG" || true)"
 OTHER_COMPILE_COUNT=$((TOTAL_COMPILE_COUNT - MAIN_COMPILE_COUNT))
 COMPILE_SUMMARY_JSON="/root/work/arm-sync/${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}_compile_summary.json"
-python - <<'PY' "$COMPILE_SUMMARY_JSON" "$BENCH" "$AUTOJIT_GATE" "$AUTOJIT_USE_JITLIST_FILTER" \
+python - "$COMPILE_SUMMARY_JSON" "$BENCH" "$AUTOJIT_GATE" "$AUTOJIT_USE_JITLIST_FILTER" <<'PY' \
   "$MAIN_COMPILE_COUNT" "$TOTAL_COMPILE_COUNT" "$OTHER_COMPILE_COUNT" "$LOG"
 import json
 import sys

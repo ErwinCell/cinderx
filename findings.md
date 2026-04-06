@@ -6,6 +6,448 @@ entrypoint:
 
 `scripts/push_to_arm.ps1` -> `scripts/arm/remote_update_build_test.sh`
 
+## 2026-04-05 performance-go JIT analysis
+
+- Scope:
+  - read-only analysis of pyperformance `go`
+  - prioritize explanation and repair design before code edits
+- Current branch:
+  - `bench-cur-7c361dce`
+- Key source files reviewed:
+  - `cinderx/Jit/hir/builder.cpp`
+  - `cinderx/Jit/hir/builder.h`
+  - `cinderx/Jit/hir/inliner.cpp`
+  - `cinderx/Jit/hir/guarded_load_elimination.cpp`
+  - `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+  - `plans/2026-03-23-issue60-go-method-values-fastpath/*`
+  - `scripts/push_to_arm.ps1`
+  - `scripts/arm/remote_update_build_test.sh`
+  - `scripts/arm/run_pyperf_subset.sh`
+
+- Unified remote entrypoint for this case:
+  - launcher:
+    - `scripts/push_to_arm.ps1`
+  - remote executor:
+    - `scripts/arm/remote_update_build_test.sh`
+  - subset helper:
+    - `scripts/arm/run_pyperf_subset.sh`
+
+- Fresh verification attempt in this session:
+  - command:
+    - `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 root@124.70.162.35 "echo remote-ok"`
+  - result:
+    - timed out on port `22`
+  - consequence:
+    - no fresh benchmark numbers were claimed in this session
+    - analysis below is grounded in the repo's prior remote issue60 evidence
+
+- Root cause summary:
+  - `go`'s important hot shape is an attr-derived but runtime-monomorphic
+    receiver, documented in the issue60 artifacts as
+    `self.reference.find(update)` / `Square.find -> reference.find`.
+  - The builder's base gate remains exact-type-only:
+    - `canUseMethodWithValuesFastPath()` returns
+      `hasStableExactReceiverType(receiver)`.
+  - When the receiver reaches HIR as generic object rather than exact type, the
+    normal lowering loses the const-descriptor method-with-values fast path and
+    falls back to `LoadMethod` / `CallMethod`.
+  - The HIR inliner only recognizes `VectorCall` and
+    `InvokeStaticFunction`, so once the call falls back to `CallMethod`, the
+    hot recursive `find()` chain stops being inlinable.
+
+- Current code path state on this branch:
+  - the branch already contains the issue60 profile-driven recovery:
+    - `emitLoadAttr()` records a pending method-with-values opportunity for
+      non-exact receivers in the outer function body
+    - `tryEmitProfiledMethodWithValuesCall()` later splits the call into:
+      - fast path:
+        - interpreter-cache-profile-validated `VectorCall`
+      - fallback path:
+        - generic `CallMethod`
+    - both generated call blocks now start with `Snapshot`
+  - this design was added specifically because earlier static heuristics were
+    either too weak or too unsafe.
+
+- Why earlier alternatives failed:
+  - attr-derived + owner-has-no-subclasses:
+    - reopened polymorphic `LOAD_ATTR_METHOD_WITH_VALUES` deopts
+    - rejected
+  - recursive-same-method-only heuristic:
+    - recovered the issue-specific hotspot
+    - but broader pyperformance sampling still showed suspicious regressions
+    - rejected as a landing candidate
+  - first hybrid/profiled attempt:
+    - still failed to reconnect the site to an inliner-visible `VectorCall`
+    - targeted regression stayed red
+  - nested fast-path inlining without a dominating `Snapshot`:
+    - crashed later in `RefcountInsertion::bindGuards()`
+    - fixed by adding explicit leading `Snapshot` instructions to both fast and
+      fallback call blocks
+
+- Most important existing remote evidence from issue60:
+  - baseline issue shape:
+    - `CallMethod = 1`
+    - `LoadMethodCached = 1`
+    - `num_inlined_functions = 0`
+  - viable profile-driven candidate:
+    - targeted regressions: `OK`
+    - `bm_go.versus_cpu()` direct probe improved by about `-2.91%`
+    - `go` pyperformance debug-single-value was effectively flat
+    - requested broad smoke subset completed without `Benchmark died`
+
+- Residual gap worth targeting next:
+  - the viable profile-driven version intentionally recovers only the outer
+    attr-derived recursive call.
+  - The issue60 findings explicitly note that the remaining recursive call
+    inside the already-inlined callee stays on generic `CallMethod` for safety.
+  - If `go` still trails the desired target, that remaining generic inner call
+    is the highest-probability next bottleneck.
+
+- Recommended repair direction:
+  - keep the exact-receiver fast path unchanged
+  - keep the profile-driven call-site split as the base design
+  - if further `go` work is needed, extend the profiled recovery so it can
+    safely re-fire inside already-inlined callees, but only after adding new
+    regressions that prove:
+    - no polymorphic deopt storm returns
+    - nested inlining still has dominating snapshots/frame state
+    - broader benchmark subset remains flat
+
+- Concrete fix options, ordered by recommendation:
+  - Option A (recommended next step):
+    - teach the profile-driven pending-call path how to recover one more nested
+      attr-derived recursive call inside an already-inlined callee
+    - likely implementation surface:
+      - `cinderx/Jit/hir/builder.cpp`
+      - `cinderx/Jit/hir/builder.h`
+      - regression coverage in
+        `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+    - expected benefit:
+      - recover the second `find()` call that still stays generic today
+  - Option B (larger but cleaner):
+    - expose stronger per-site receiver monomorphism/profile information from
+      the interpreter specialization cache to the builder, so the builder does
+      not need the current pending-load-to-call handoff trick
+    - higher engineering cost, but more general
+  - Option C (not recommended):
+    - broaden static heuristics again
+    - repo evidence already shows this is the quickest path back to polymorphic
+      deopts or unexplained broad regressions
+
+### Fresh ARM rerun update (2026-04-05)
+
+- Unified remote entrypoint:
+  - manual archive upload into `/root/work/incoming`
+  - execute `scripts/arm/remote_update_build_test.sh`
+- Remote workspace:
+  - workdir: `/root/work/cinderx-go-analysis-20260405`
+  - driver venv: `/root/venv-cinderx314-go-analysis-20260405`
+
+- Benchmark-only rerun settings:
+  - `BENCH=go`
+  - `SKIP_ARM_RUNTIME_VALIDATION=1`
+  - `SKIP_PYPERF=0`
+  - `CINDERX_ENABLE_SPECIALIZED_OPCODES=1`
+- Fresh benchmark artifacts:
+  - `go_jitlist_20260405_084805.json`
+    - value: `0.24736241299990525 s`
+  - `go_autojit50_20260405_084805.json`
+    - value: `0.2466943160000028 s`
+  - `go_autojit50_20260405_084805_compile_summary.json`
+    - `main_compile_count = 34`
+    - `total_compile_count = 34`
+    - `other_compile_count = 0`
+  - `pyperf_venv_20260405_084805_worker.json`
+    - `jit_enabled = true`
+    - `cinderx_initialized = true`
+- Interpretation:
+  - the `go` benchmark gate itself is not failing because JIT is disabled
+  - benchmark workers are JIT-enabled and do compile benchmark `__main__`
+    functions on the current branch
+
+- Focused issue60 safety rerun settings:
+  - same unified entrypoint
+  - `SKIP_ARM_RUNTIME_VALIDATION=1`
+  - `SKIP_PYPERF=1`
+  - `EXTRA_TEST_CMD='PYTHONFAULTHANDLER=1 python -m unittest discover -s cinderx/PythonLib/test_cinderx -p test_arm_runtime.py -k attr_derived_polymorphic -v'`
+- Fresh focused regression result:
+  - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+    - test body result: `ok`
+    - process result: `SIGSEGV` immediately after unittest summary
+- Crash evidence:
+  - Python fatal error: `Segmentation fault`
+  - top native stack:
+    - `_cinderx.so`
+    - `outputTypeWithRecursiveCoroHint`
+    - `reflowTypes`
+    - `SSAify::Run`
+    - `Compiler::runPasses`
+    - `Compiler::Compile`
+    - `compileFunction`
+    - `Preloader::makePreloader`
+- Interpretation:
+  - current branch still contains a compiler-stability bug on the issue60
+    safety path
+  - this blocker is separate from the historical `go` throughput diagnosis, but
+    it materially changes repair priority
+  - before extending deeper nested-call recovery for `go`, the next change
+    round should first root-cause and lock down this `SSAify/reflowTypes`
+    crash with a failing regression
+
+### Root-cause narrowing for the fresh `SSAify/reflowTypes` crash
+
+- New diagnostic evidence from a focused rerun with:
+  - `PYTHONFAULTHANDLER=1`
+  - `PYTHONJITDEBUG=1`
+  - `PYTHONJITLOGFILE=/tmp/attr_derived_poly_debug_20260405.log`
+- The last compile target before the crash is:
+  - `_colorize:__annotate__`
+- That means the crash is not happening while compiling `Holder.run` from the
+  issue60 reproducer itself.
+- Instead, the reproducer pushes the outer `unittest` process far enough that
+  it later auto-compiles a lazy-annotations thunk during teardown / reporting.
+- Confirmation by counterexample through the same unified remote entrypoint:
+  - rerun the same focused unittest with only:
+    - `PYTHONJITAUTO=1000000`
+  - result:
+    - `Ran 2 tests ... OK`
+    - no crash
+  - interpretation:
+    - raising the outer-process autojit threshold suppresses the failure
+    - the trigger is therefore outer-process compile scheduling, not the inner
+      `Holder.run` subprocess body
+
+- `_colorize.__annotate__` shape on the ARM host:
+  - module: `/opt/python-3.14/lib/python3.14/_colorize.py`
+  - `co_flags = 3`
+  - bytecode is simple and non-coroutine:
+    - `LOAD_FAST_BORROW`
+    - `LOAD_SMALL_INT`
+    - `COMPARE_OP`
+    - `BUILD_MAP`
+    - `LOAD_GLOBAL`
+    - `CONTAINS_OP`
+    - `COPY`
+    - `LOAD_CONST`
+    - `STORE_SUBSCR`
+    - `RETURN_VALUE`
+  - direct 2026-04-05 host check against
+    `_colorize.can_colorize.__annotate__` confirmed:
+    - there is no `SEND`
+    - there are multiple `LOAD_GLOBAL` opcodes
+
+- Most likely root-cause hypothesis:
+  - file:
+    - `cinderx/Jit/hir/pass.cpp`
+  - lines:
+    - around `361-392`
+  - problem:
+    - `outputTypeWithRecursiveCoroHint()` groups many ordinary object-returning
+      opcodes together with `Opcode::kSend`
+    - the shared case body then unconditionally does:
+      - `static_cast<const Send&>(instr)`
+      - `sendCalleeFunction(...)`
+      - `sendResultType(...)`
+  - concrete bad shape:
+    - `Opcode::kLoadGlobal`, `kLoadMethod`, `kLoadAttr`, `kMatchKeys`, etc.
+      all fall into that same block before `kSend`
+  - why this explains the stack:
+    - `_colorize.__annotate__` contains `LOAD_GLOBAL`
+    - during `SSAify::Run()`, `reflowTypes()` calls
+      `outputTypeWithRecursiveCoroHint()` for every instruction output
+    - once a non-`Send` instruction such as `LoadGlobal` enters that shared
+      block, the `static_cast<const Send&>(instr)` is undefined behavior
+    - that matches the native crash top frame in
+      `outputTypeWithRecursiveCoroHint -> reflowTypes -> SSAify::Run`
+  - recent commit that introduced the risk:
+    - `247b4a5005ec` (`Specialize recursive coroutine add types`)
+  - minimal diagnostic / assertion to validate:
+    - before any send-specific logic in that block:
+      - `JIT_DCHECK(instr.IsSend(), "send-specific type hint path reached for {}", instr.opname());`
+    - or, equivalently, split `case Opcode::kSend` into its own dedicated case
+      and keep the other opcodes on the old `return TObject` path
+
+- Second, weaker but still useful hypothesis:
+  - file:
+    - `cinderx/Jit/hir/annotation_index.cpp`
+    - `cinderx/Jit/hir/preload.h`
+  - problem:
+    - `AnnotationIndex::from_function()` now calls `PyFunction_GetAnnotations()`
+      when specialized opcodes are enabled
+    - on Python 3.14 this can execute a synthetic `__annotate__` function
+      during preloading
+    - that creates a compile-during-preload path for annotation thunks which
+      was not part of the original issue60 benchmark analysis
+  - why this matters:
+    - it explains why the crash target is `_colorize:__annotate__` instead of
+      the benchmark reproducer itself
+    - it is the trigger that makes the `pass.cpp` UB deterministic in this
+      test path
+  - minimal diagnostic / assertion to validate:
+    - log or assert the function fullname inside `Compiler::Compile()` /
+      `Preloader::makePreloader()` when `AnnotationIndex::from_function()`
+      requests annotations, to confirm the failing compile target is indeed the
+      annotation thunk
+
+- Current assessment:
+  - the first hypothesis is the primary one
+  - the second explains the trigger, not the likely memory-safety bug itself
+
+### Narrowed root-cause update (2026-04-05)
+
+- Additional direct evidence:
+  - outer unittest harness defaults:
+    - `jit_enabled = True`
+    - `compile_after = None`
+  - raising the outer harness threshold with `PYTHONJITAUTO=1000000` makes the
+    focused `attr_derived_polymorphic` unittest run complete without crashing
+  - direct `force_compile(_colorize.can_colorize.__annotate__)` reproduces the
+    same `outputTypeWithRecursiveCoroHint -> reflowTypes -> SSAify::Run` crash
+    even outside the issue60 test harness
+- Most likely immediate bug in `pass.cpp`:
+  - `outputTypeWithRecursiveCoroHint()` groups `case Opcode::kSend` together
+    with many non-`Send` opcodes such as:
+    - `kLoadGlobal`
+    - `kLoadMethod`
+    - `kLoadAttr`
+    - `kMatchKeys`
+  - inside that shared block it unconditionally does:
+    - `static_cast<const Send&>(instr)`
+    - `sendCalleeFunction(...)`
+    - `sendResultType(...)`
+  - source region:
+    - `cinderx/Jit/hir/pass.cpp` around the grouped case beginning at the
+      `kBuildInterpolation/.../kSend` cluster and the `static_cast<const Send&>`
+      calls
+- Why this matches the crash:
+  - `_colorize.can_colorize.__annotate__` bytecode contains multiple
+    `LOAD_GLOBAL` instructions and no actual `SEND`
+  - once `reflowTypes()` visits one of those `LoadGlobal` HIR instructions,
+    `outputTypeWithRecursiveCoroHint()` can enter the shared case block and
+    reinterpret a non-`Send` instruction as `Send`
+  - that is immediate undefined behavior and cleanly explains the top-of-stack
+    crash inside `outputTypeWithRecursiveCoroHint()`
+- Secondary contributing factor:
+  - issue60-specific method-with-values recovery is still relevant as the
+    original trigger that exposed the broader compiler stability problem
+  - but the direct `_colorize:__annotate__` reproducer shows the crash is now
+    broader than the `go` benchmark shape itself
+- Minimal diagnostics / assertions to validate before changing behavior:
+  - add `JIT_DCHECK(instr.IsSend())` immediately before any
+    `static_cast<const Send&>(instr)` in `outputTypeWithRecursiveCoroHint()`
+  - log `current_func->fullname` plus `instr.opcode()` in that branch
+  - expected immediate proof:
+    - `_colorize:__annotate__` will hit the branch on a non-`Send` opcode such
+      as `LoadGlobal`
+
+### Follow-up isolation on the same ARM workspace
+
+- Target:
+  - determine whether the focused crash is caused by the issue60 test body
+    itself or by incidental outer-harness auto-jit compilation
+
+- Experiment A: custom one-test harness with outer compile threshold raised
+  - remote command shape:
+    - load `test_arm_runtime.py` manually
+    - call:
+      - `cinderx.jit.enable()`
+      - `cinderx.jit.compile_after_n_calls(1000000)`
+    - run only:
+      - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+  - result:
+    - `Ran 1 test ... OK`
+    - no segfault
+- Interpretation:
+  - the attr-derived polymorphic regression body itself is not sufficient to
+    reproduce the crash
+  - the `SIGSEGV` depends on incidental compilation in the outer
+    `python -m unittest discover ...` harness
+
+- Experiment B: direct failing harness rerun with JIT log enabled
+  - remote command shape:
+    - `PYTHONFAULTHANDLER=1`
+    - `PYTHONJITDEBUG=1`
+    - `PYTHONJITLOGFILE=/tmp/attr_poly_unittest.log`
+    - `python -m unittest discover -s cinderx/PythonLib/test_cinderx -p test_arm_runtime.py -k attr_derived_polymorphic -v`
+  - result:
+    - test output still reports:
+      - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts ... ok`
+    - process still segfaults after the unittest summary
+  - important JIT log tail evidence:
+    - incidental harness compiles include:
+      - `unittest.case:TestCase.run`
+      - `unittest.runner:TextTestResult.printErrors`
+      - `unittest.suite:BaseTestSuite._removeTestAtIndex`
+    - during `BaseTestSuite._removeTestAtIndex` compilation:
+      - `builder.cpp:3092 -- profiled-mwv call emitted for instr 124`
+    - the final compile started before the crash is:
+      - `_colorize:__annotate__`
+
+- Strong updated interpretation:
+  - the current crash is most likely not a direct failure of the issue60 test's
+    child subprocess
+  - the immediate reproducer is outer-harness auto-jit compiling unrelated
+    stdlib/unittest code
+  - `_colorize:__annotate__` is a key suspect because the earlier native stack
+    also included:
+    - `AnnotationIndex::from_function`
+    - `PyFunction_GetAnnotations`
+    - `Preloader::makePreloader`
+  - that combination strongly suggests a re-entrant or otherwise unsafe compile
+    path around annotation thunk functions, with `reflowTypes()` /
+    `outputTypeWithRecursiveCoroHint()` being where the compiler finally faults
+
+### Trigger-chain hypothesis for the post-test crash
+
+- The focused regression's own subprocess body is not the crashing process:
+  - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+    runs a temporary script via `subprocess.run(...)`
+  - that inner script explicitly:
+    - `jit.enable()`
+    - `jit.enable_specialized_opcodes()`
+    - `jit.compile_after_n_calls(1000000)`
+    - `jit.force_compile(Holder.run)`
+  - and the outer unittest assertion reports the test body itself as `ok`
+- The outer unittest process still has CinderX loaded:
+  - `cinderx.pth` imports `cinderx` on startup
+  - `ArmRuntimeTests` therefore runs inside a JIT-capable outer process too
+- The most important trigger is in `ArmRuntimeTests.tearDown()`:
+  - it restores the saved outer-process compile policy
+  - when the saved value is `None`, it calls `cinderx.jit.compile_after_n_calls(0)`
+  - remote driver-venv probe on the same workdir printed:
+    - `jit.get_compile_after_n_calls() -> None`
+- Why that matters:
+  - `compile_after_n_calls_impl()` in `pyjit.cpp` explicitly:
+    - stores the new threshold
+    - then calls `walkFunctionObjects(...)`
+    - and "schedule[s] all pre-existing functions for compilation"
+  - `scheduleJitCompile()` switches scheduled functions to `jitVectorcall`
+  - `jitVectorcall()` enters `compileFunction()` on the next call once the
+    threshold condition is satisfied
+- This explains the observed timing:
+  - the selected issue60 test finishes and reports `ok`
+  - `tearDown()` then bulk-schedules the already-live outer-process functions
+  - unittest summary / shutdown code immediately calls some of those functions
+  - one such call enters `compileFunction()`
+  - compilation then crashes in:
+    - `Preloader::makePreloader`
+    - `outputTypeWithRecursiveCoroHint`
+    - `reflowTypes`
+    - `SSAify::Run`
+
+- Current best classification:
+  - issue60 is the route that exposed the crash
+  - but the crash shape itself looks more general than issue60's
+    method-with-values lowering
+  - the strongest local suspect is the newer recursive-coroutine-aware type
+    reflow logic added in commit `247b4a50` (`Specialize recursive coroutine add types`)
+  - reason:
+    - the top native frames are all in `pass.cpp` / `ssa.cpp`
+    - those paths were changed recently and are not specific to
+      method-with-values lowering
+    - the outer-process trigger bulk-schedules arbitrary live functions, so the
+      eventual crashing compile does not need to be `Holder.run` itself
+
 ### Open case: nqueens residual MakeFunction / issue #61
 
 - Date: `2026-03-24`
@@ -50,9 +492,248 @@ entrypoint:
     - `MakeFunction = 1`
     - `MakeTuple = 1`
     - `SetFunctionAttr = 1`
+
+## 2026-04-05 post-fix targeted verification
+
+- Minimal local fix under test:
+  - `cinderx/Jit/hir/pass.cpp`
+    - split `Opcode::kSend` out of the shared object-returning opcode cluster
+    - restore the neighboring non-`Send` opcodes to `return TObject`
+    - add `JIT_DCHECK(instr.IsSend(), ...)` on the send-specific branch
+  - `cinderx/Jit/hir/annotation_index.cpp`
+    - stop eagerly calling `PyFunction_GetAnnotations()` when only
+      `specialized_opcodes` is enabled
+    - keep eager annotation materialization only for true
+      `emit_type_annotation_guards`
+  - `cinderx/PythonLib/test_cinderx/test_arm_runtime.py`
+    - add `test_force_compile_annotation_thunk_does_not_crash`
+    - add `test_specialized_opcodes_do_not_eagerly_execute_annotation_thunks`
+
+- Remote validation path:
+  - unified remote entrypoint:
+    - `scripts/arm/remote_update_build_test.sh`
+  - source packaging:
+    - working-tree snapshot tar
+    - reason:
+      - `git archive HEAD` would omit the new uncommitted local regression and fix
+
+- Targeted remote regression result on the fixed working-tree snapshot:
+  - custom runner kept outer `compile_after_n_calls(1000000)` to avoid
+    incidental post-test auto-JIT noise
+  - executed tests:
+    - `test_force_compile_annotation_thunk_does_not_crash`
+    - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+  - result:
+    - `Ran 2 tests in 0.131s`
+    - `OK`
+
+- Additional single-test remote verification after the second fix:
+  - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+    - `Ran 1 test in 0.206s`
+    - `OK`
+  - `test_specialized_opcodes_do_not_eagerly_execute_annotation_thunks`
+    - `Ran 1 test in 0.315s`
+    - `OK`
+
+- Interpretation:
+  - the minimal `pass.cpp` change is sufficient to stop the direct
+    `_colorize.can_colorize.__annotate__` crash on the targeted path
+  - the follow-up `annotation_index.cpp` narrowing removes the
+    `specialized_opcodes`-only eager annotation-materialization trigger
+  - the original issue60 safety regression now remains green under the same
+    fixed build when rerun in isolation
+
+- Remaining gap:
+  - the pyperformance harness syntax issue in
+    `scripts/arm/remote_update_build_test.sh` was subsequently fixed by
+    correcting the here-doc argument order
+  - a same-build `go` benchmark rerun now completes through the unified remote
+    entrypoint
+
+- Fresh post-fix `go` benchmark gate:
+  - artifacts:
+    - `go_jitlist_20260405_181404.json`
+    - `go_autojit50_20260405_181404.json`
+    - `go_autojit50_20260405_181404_compile_summary.json`
+    - `pyperf_venv_20260405_181404_worker.json`
+  - jitlist:
+    - `0.5156086859933566 s`
+  - autojit50:
+    - `0.5089590209972812 s`
+  - compile summary:
+    - `main_compile_count = 34`
+    - `total_compile_count = 34`
+    - `other_compile_count = 0`
+  - worker probe:
+    - `jit_enabled = true`
+    - `cinderx_initialized = true`
+- Interpretation:
+  - the fixed working-tree snapshot now passes both:
+    - targeted stability regressions
+    - benchmark-level `go` gate
+  - the new `go` numbers were collected under noticeably higher host load than
+    the earlier single-benchmark sample (`runnable_threads = 9` vs `1`), so
+    they should be treated as fresh gate evidence rather than a clean
+    apples-to-apples A/B performance claim
   - the closure setup now sits after the outer-loop prefix and before the
     inner genexpr iterator loop, so it is no longer rebuilt in the innermost
     repeated path
+
+### Same-host A/B rerun on 2026-04-05
+
+- Method:
+  - same ARM host
+  - same remote entrypoint
+  - same benchmark (`BENCH=go`)
+  - same flags:
+    - `SKIP_ARM_RUNTIME_VALIDATION=1`
+    - `RECREATE_PYPERF_VENV=1`
+    - `CINDERX_ENABLE_SPECIALIZED_OPCODES=1`
+  - separate workdirs and driver venvs for:
+    - baseline `HEAD`
+    - current fixed working-tree snapshot
+
+- Baseline artifacts:
+  - workdir:
+    - `/root/work/cinderx-go-baseline-ab-20260405`
+  - `go_jitlist_20260405_193137.json`
+    - `0.24918644900026266 s`
+    - `runnable_threads = 2`
+  - `go_autojit50_20260405_193137.json`
+    - `0.4742307880005683 s`
+    - `runnable_threads = 5`
+  - compile summary:
+    - `main_compile_count = 34`
+
+- Fixed artifacts:
+  - workdir:
+    - `/root/work/cinderx-go-fixed-ab-20260405`
+  - `go_jitlist_20260405_194714.json`
+    - `0.25993193100293865 s`
+    - `runnable_threads = 2`
+  - `go_autojit50_20260405_194714.json`
+    - `0.25297167700045975 s`
+    - `runnable_threads = 2`
+  - compile summary:
+    - `main_compile_count = 34`
+
+- Coarse comparison:
+  - jitlist:
+    - fixed vs baseline: about `+4.31%` slower
+  - autojit50:
+    - fixed vs baseline: about `-46.66%` faster
+
+- Interpretation:
+  - the autojit50 direction is strongly positive after the stability fixes
+  - the jitlist direction is slightly negative in this single-sample rerun
+  - because these are still single-sample gate numbers and the autojit baseline
+    had a different `runnable_threads` value, treat this as directional rather
+    than a final precise performance claim
+  - a follow-up attempt to run a direct `bm_go.versus_cpu()`-style probe was
+    deferred when the ARM host became unreachable again (`ssh ... port 22:
+    Connection timed out`)
+
+### Requested subset regression sweep (2026-04-06)
+
+- Method:
+  - same ARM host
+  - same unified remote entrypoint
+  - same benchmark filter:
+    - `generators,coroutines,comprehensions,richards,richards_super,float,go,deltablue,raytrace,nqueens,nbody,unpack_sequence,fannkuch,coverage,scimark,spectral_norm,chaos,logging`
+  - `SAMPLES=3`
+  - baseline:
+    - `/root/work/cinderx-go-baseline-ab-20260405`
+  - fixed:
+    - `/root/work/cinderx-go-fixed-ab-20260405`
+
+- First-pass subset compare (median delta fixed vs baseline):
+  - `chaos`: `-2.64%`
+  - `comprehensions`: `-6.14%`
+  - `coroutines`: `+3.03%`
+  - `coverage`: `+3.06%`
+  - `deltablue`: `-0.73%`
+  - `fannkuch`: `+7.59%`
+  - `float`: `+2.80%`
+  - `generators`: `+0.17%`
+  - `go`: `+1.36%`
+  - `logging_format`: `-4.73%`
+  - `logging_silent`: `-5.20%`
+  - `logging_simple`: `-1.23%`
+  - `nbody`: `-1.01%`
+  - `nqueens`: `-1.69%`
+  - `raytrace`: `+0.60%`
+  - `richards`: `+0.50%`
+  - `richards_super`: `+0.83%`
+  - `scimark_fft`: `+0.85%`
+  - `scimark_lu`: `+0.25%`
+  - `scimark_monte_carlo`: `+1.25%`
+  - `scimark_sor`: `-3.80%`
+  - `scimark_sparse_mat_mult`: `-0.78%`
+  - `spectral_norm`: `-4.94%`
+  - `unpack_sequence`: `+1.22%`
+- Threshold read:
+  - first pass had only one `>=5%` regression candidate:
+    - `fannkuch`
+
+- Focused `fannkuch` follow-up:
+  - rerun as dedicated benchmark gate on the same host
+  - baseline:
+    - `fannkuch_jitlist_20260406_095415.json`: `0.4893510160000005 s`
+    - `fannkuch_autojit50_20260406_095415.json`: `0.4726716300001499 s`
+  - fixed:
+    - `fannkuch_jitlist_20260406_100253.json`: `0.4717694239998309 s`
+    - `fannkuch_autojit50_20260406_100253.json`: `0.4497695210002348 s`
+  - compile summary:
+    - `main_compile_count = 1`
+  - focused delta:
+    - jitlist: about `-3.59%`
+    - autojit50: about `-4.84%`
+
+- Final subset conclusion:
+  - after the focused `fannkuch` rerun, there is no benchmark in the requested
+    set with confirmed `>=5%` regression
+  - the initial `fannkuch` `+7.59%` signal was measurement noise from the
+    3-sample subset sweep, not a stable regression
+
+### Direct `bm_go.versus_cpu()` rerun on 2026-04-06
+
+- Method:
+  - same ARM host
+  - same `bm_go/run_benchmark.py`
+  - same `bench_pyperf_direct.py` harness
+  - same flags:
+    - `PYTHONJITENABLEHIRINLINER=1`
+    - `--compile-strategy all`
+    - `--specialized-opcodes`
+    - `--prewarm-runs 1`
+    - `--samples 5`
+  - baseline workdir:
+    - `/root/work/cinderx-go-baseline-ab-20260405`
+  - fixed workdir:
+    - `/root/work/cinderx-go-fixed-ab-20260405`
+
+- Baseline direct artifact:
+  - `/root/work/arm-sync/go_direct_baseline_20260406.json`
+  - `median_wall_sec = 0.5150911270000051`
+  - `min_wall_sec = 0.35995911899999555`
+  - `total_deopt_count = 63960`
+
+- Fixed direct artifact:
+  - `/root/work/arm-sync/go_direct_fixed_20260406.json`
+  - `median_wall_sec = 0.17598324100003992`
+  - `min_wall_sec = 0.17564833100004762`
+  - `total_deopt_count = 63960`
+
+- Direct comparison:
+  - fixed vs baseline median: about `-65.83%`
+
+- Interpretation:
+  - this direct issue-specific probe strongly supports the original diagnosis:
+    the fixes materially improve the `go` hot path even though the coarse
+    pyperformance gate can look flatter or noisier
+  - the identical top-level deopt totals suggest the main win here is not from
+    removing the dominant remaining deopt buckets, but from recovering a faster
+    compiled call shape on the benchmark's critical path
 
 - ARM A/B performance snapshot:
   - method:
@@ -4772,3 +5453,164 @@ Conclusion:
     - interpretation:
       - current evidence supports `3.15` code/runtime compatibility
       - there is likely still a harness-level issue in the `3.15` compatibility-only path of `remote_update_build_test.sh`
+
+## 2026-04-05 `pyperformance go` JIT gap re-analysis
+
+### Requested validation path
+
+- Unified remote entrypoint in this repo:
+  - Windows wrapper:
+    - `scripts/push_to_arm.ps1`
+    - exposes:
+      - `ArmHost`
+      - `Benchmark`
+      - `ExtraTestCmd`
+      - `ExtraVerifyCmd`
+  - remote executor:
+    - `scripts/arm/remote_update_build_test.sh`
+    - consumes:
+      - `BENCH`
+      - `EXTRA_TEST_CMD`
+      - `EXTRA_VERIFY_CMD`
+    - runs:
+      - targeted extra commands
+      - pyperformance `jitlist` / `autojit` gates via `--debug-single-value`
+
+### Fresh verification status
+
+- Attempted direct connectivity check from this environment:
+  - command:
+    - `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 root@124.70.162.35 "echo remote-ok"`
+  - result:
+    - `ssh: connect to host 124.70.162.35 port 22: Connection timed out`
+- Current implication:
+  - fresh remote rerun through the requested entrypoint is blocked by network
+    reachability, not by local repository state
+  - the analysis below therefore combines:
+    - current source inspection
+    - previously validated issue45 / issue49 / issue60 artifacts already stored
+      in this repository
+
+### Source-backed root cause
+
+- The core regression trigger is the exact-only gate in
+  `canUseMethodWithValuesFastPath()`:
+  - current source keeps the fast path only for
+    `hasStableExactReceiverType(receiver)`
+- That is safe for polymorphic receiver sites, but it loses the hot `go`
+  benchmark shape when the receiver is:
+  - attr-derived
+  - runtime-monomorphic
+  - not exact in HIR
+- The important `go` call shape is the attr-derived recursive receiver:
+  - `self.reference.find(update)`
+- When that receiver misses the fast path, lowering falls back from:
+  - `LOAD_ATTR_METHOD_WITH_VALUES -> const descr + VectorCall`
+  to:
+  - `LoadMethodCached + CallMethod`
+- This matters because the HIR inliner only considers:
+  - `VectorCall`
+  - `InvokeStaticFunction`
+- Result:
+  - the recursive `find()` hot chain becomes non-inlinable
+  - `go` loses the HIR-first win that earlier issue45 work had recovered
+
+### Existing repair state already present in the branch
+
+- The current branch already contains the issue60 profile-driven recovery path:
+  - non-exact `LOAD_ATTR_METHOD_WITH_VALUES` sites can leave a pending profiled
+    method-with-values call record
+  - the following `CALL` can split into:
+    - fast profiled `VectorCall`
+    - generic `CallMethod` fallback
+- That pending state carries:
+  - `receiver`
+  - `callable`
+  - `descr`
+  - `type_version`
+  - `keys_version`
+- The recovery is intentionally conservative:
+  - it is only enabled for the outer function body
+  - already-inlined callees stay on generic method load/call
+- Reason for the conservative boundary:
+  - earlier broader shapes reopened polymorphic
+    `LOAD_ATTR_METHOD_WITH_VALUES` deopt storms
+  - the first profile-driven implementation also crashed after inlining because
+    the synthetic call blocks lacked a dominating `Snapshot`
+  - the current code fixes that by emitting a leading `Snapshot` before both
+    fast and fallback call blocks
+
+### Historical validated evidence relevant to the diagnosis
+
+- Issue45 established that the intended `go` shape is profitable once the hot
+  path becomes inlinable again:
+  - standard pyperformance smoke:
+    - `go`: `350 ms -> 276 ms`
+  - full matrix A/B:
+    - `go`: `336 ms -> 265 ms`
+- Issue49 then tightened method-with-values lowering to exact receivers to stop
+  polymorphic deopts:
+  - that fixed the unsafe polymorphic shape
+  - but it also removed the `go` attr-derived monomorphic fast path
+- Issue60 documented the exact recovery experiments:
+  - rejected:
+    - `attr-derived + owner-has-no-subclasses`
+    - `recursive same-method only`
+  - viable:
+    - profile-driven call-site split using interpreter specialization-cache
+      facts plus generic fallback
+- Issue60 round-4 repository evidence shows:
+  - targeted regressions: all `OK`
+  - direct `bm_go.versus_cpu()` probe:
+    - base: `1.744004352 s`
+    - current candidate: `1.693260981 s`
+    - delta: about `-2.91%`
+  - direct pyperformance `go` single-value:
+    - `127 ms -> 127 ms`
+  - interpretation:
+    - the profile-driven recovery restored the issue-specific hot path
+    - the coarse pyperformance `go` result became roughly flat rather than
+      obviously regressed
+
+### Most likely remaining bottleneck
+
+- If `go` still has a residual JIT gap on the current branch, the highest
+  probability source is:
+  - the nested attr-derived recursive call that still intentionally remains on
+    generic `CallMethod` after the outer call is recovered
+- In other words:
+  - the branch likely fixed the outermost lost-inline problem
+  - but it deliberately stops short of reopening the same mechanism inside the
+    already-inlined callee
+
+### Ranked repair options
+
+- Recommended next option:
+  - extend the existing profile-driven recovery so it can safely cover the next
+    nested attr-derived recursive call inside already-inlined callees
+  - keep the generic fallback
+  - preserve the current polymorphic regression tests
+- Good longer-term option:
+  - plumb richer per-call-site receiver monomorphism/profile information into
+    builder decisions instead of relying on the current pending handoff between
+    `LOAD_ATTR_METHOD_WITH_VALUES` and the following `CALL`
+- Not recommended:
+  - reopening broad static heuristics such as:
+    - `attr-derived`
+    - `owner has no subclasses`
+    - narrow same-method-only heuristics as a landing strategy
+  - repository evidence already shows those shapes are brittle and can reopen
+    polymorphic deopt storms or broader benchmark regressions
+
+### TDD requirements for the next change round
+
+- Keep or extend:
+  - `test_attr_derived_monomorphic_method_load_restores_inlining`
+  - `test_attr_derived_polymorphic_method_load_avoids_method_with_values_deopts`
+  - `test_polymorphic_virtual_method_avoids_method_with_values_guard_deopts`
+  - `test_polymorphic_method_load_avoids_method_with_values_deopts`
+  - `test_polymorphic_loop_local_method_load_avoids_method_with_values_deopts`
+- Add, if the nested recovery is attempted:
+  - a dedicated regression that proves the inner recursive attr-derived call is
+    recovered without reintroducing polymorphic deopts or snapshot-related
+    compile failures

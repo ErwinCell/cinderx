@@ -14,3 +14,14 @@ def test_push_to_arm_exposes_arm_runtime_validation_skip_flag() -> None:
     text = Path("scripts/push_to_arm.ps1").read_text(encoding="utf-8")
     assert '[switch]$SkipArmRuntimeValidation' in text
     assert 'SKIP_ARM_RUNTIME_VALIDATION' in text
+
+
+def test_remote_entrypoint_uses_valid_python_heredoc_argument_order() -> None:
+    text = Path("scripts/arm/remote_update_build_test.sh").read_text(encoding="utf-8")
+    assert 'python - "$PYVENV_PATH/pyvenv.cfg" <<\'PY\'' in text
+    assert (
+        'python - "$COMPILE_SUMMARY_JSON" "$BENCH" "$AUTOJIT_GATE" '
+        '"$AUTOJIT_USE_JITLIST_FILTER" <<\'PY\' \\'
+    ) in text
+    assert 'python - <<\'PY\' "$PYVENV_PATH/pyvenv.cfg"' not in text
+    assert 'python - <<\'PY\' "$COMPILE_SUMMARY_JSON"' not in text
