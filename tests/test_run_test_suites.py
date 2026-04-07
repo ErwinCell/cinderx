@@ -161,10 +161,19 @@ class PathAndEnvTests(unittest.TestCase):
         options = compute_cmake_feature_options("3.14")
         self.assertEqual(
             set(options),
-            {"ENABLE_ADAPTIVE_STATIC_PYTHON", "ENABLE_LIGHTWEIGHT_FRAMES"},
+            {
+                "ENABLE_ADAPTIVE_STATIC_PYTHON",
+                "ENABLE_EVAL_HOOK",
+                "ENABLE_INTERPRETER_LOOP",
+                "ENABLE_LIGHTWEIGHT_FRAMES",
+                "ENABLE_PEP523_HOOK",
+            },
         )
         self.assertIn(options["ENABLE_ADAPTIVE_STATIC_PYTHON"], {"ON", "OFF"})
+        self.assertIn(options["ENABLE_EVAL_HOOK"], {"ON", "OFF"})
+        self.assertIn(options["ENABLE_INTERPRETER_LOOP"], {"ON", "OFF"})
         self.assertIn(options["ENABLE_LIGHTWEIGHT_FRAMES"], {"ON", "OFF"})
+        self.assertIn(options["ENABLE_PEP523_HOOK"], {"ON", "OFF"})
 
 
 class BannerAndSummaryTests(unittest.TestCase):

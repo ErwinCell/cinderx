@@ -67,13 +67,17 @@ def is_oss_feature_enabled(py_version: str, machine: str, feature: str) -> bool:
 
 def compute_cmake_feature_options(py_version: str) -> dict[str, str]:
     machine = platform.machine()
+    is_314plus = py_version in {"3.14", "3.15"}
     return {
         "ENABLE_ADAPTIVE_STATIC_PYTHON": (
             "ON" if is_oss_feature_enabled(py_version, machine, "adaptive_static_python") else "OFF"
         ),
+        "ENABLE_EVAL_HOOK": "OFF",
+        "ENABLE_INTERPRETER_LOOP": "ON" if is_314plus else "OFF",
         "ENABLE_LIGHTWEIGHT_FRAMES": (
             "ON" if is_oss_feature_enabled(py_version, machine, "lightweight_frames") else "OFF"
         ),
+        "ENABLE_PEP523_HOOK": "ON" if is_314plus else "OFF",
     }
 
 
