@@ -18,10 +18,13 @@ from run_test_suites import (  # noqa: E402
     format_finish_summary,
     format_start_banner,
     is_product_source,
+    pick_pythonlib_build_dir,
+    pick_product_build_dir,
     product_source_roots,
     parse_gtest_list,
     parse_json_list,
     pick_gcc_bin_dir,
+    pick_runtime_build_dir,
 )
 
 
@@ -122,6 +125,36 @@ class PathAndEnvTests(unittest.TestCase):
             bin_dir.mkdir()
             (bin_dir / "gcc").write_text("", encoding="utf-8")
             self.assertEqual(pick_gcc_bin_dir(root), bin_dir)
+
+    def test_pick_pythonlib_build_dir_defaults_to_python_build(self) -> None:
+        class _Args:
+            runtime_build_dir = None
+            coverage = False
+
+        self.assertEqual(
+            pick_pythonlib_build_dir(_Args()),
+            Path(__file__).resolve().parent.parent / "build-pythonlib-gcc14",
+        )
+
+    def test_pick_runtime_build_dir_defaults_to_runtime_build(self) -> None:
+        class _Args:
+            runtime_build_dir = None
+            coverage = False
+
+        self.assertEqual(
+            pick_runtime_build_dir(_Args()),
+            Path(__file__).resolve().parent.parent / "build-runtime-tests-gcc14",
+        )
+
+    def test_pick_product_build_dir_defaults_to_python_build(self) -> None:
+        class _Args:
+            runtime_build_dir = None
+            coverage = True
+
+        self.assertEqual(
+            pick_product_build_dir(_Args()),
+            Path(__file__).resolve().parent.parent / "build-pythonlib-gcc14-cov",
+        )
 
 
 class BannerAndSummaryTests(unittest.TestCase):

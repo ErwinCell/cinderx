@@ -437,7 +437,7 @@ def run_pythonlib(
 ) -> tuple[int, list[str], SuiteRunSummary]:
     python_dir = ensure_dir(output_root / "pythonlib")
     logs_dir = ensure_dir(python_dir / "logs")
-    build_dir = pick_runtime_build_dir(args)
+    build_dir = pick_pythonlib_build_dir(args)
 
     if args.coverage:
         env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
@@ -536,6 +536,17 @@ def pick_runtime_build_dir(args: argparse.Namespace) -> Path:
         return args.runtime_build_dir.resolve()
     name = "build-runtime-tests-gcc14-cov" if args.coverage else "build-runtime-tests-gcc14"
     return REPO_ROOT / name
+
+
+def pick_pythonlib_build_dir(args: argparse.Namespace) -> Path:
+    if args.runtime_build_dir is not None:
+        return args.runtime_build_dir.resolve()
+    name = "build-pythonlib-gcc14-cov" if args.coverage else "build-pythonlib-gcc14"
+    return REPO_ROOT / name
+
+
+def pick_product_build_dir(args: argparse.Namespace) -> Path:
+    return pick_pythonlib_build_dir(args)
 
 
 def pick_runtime_binary(args: argparse.Namespace, build_dir: Path) -> Path:
@@ -949,6 +960,26 @@ def run_runtime(
     return rc, tests, summary
 
 
+def ensure_product_coverage_build(
+    args: argparse.Namespace,
+    output_root: Path,
+) -> Path:
+    build_dir = pick_product_build_dir(args)
+    baseline_dir = ensure_dir(output_root / "product-baseline")
+    env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
+
+    maybe_build_native(
+        output_dir=baseline_dir,
+        env=env,
+        build_dir=build_dir,
+        build_runtime_tests=False,
+        targets=["_cinderx"],
+        coverage=True,
+        skip_build=args.no_build,
+    )
+    return build_dir
+
+
 def write_root_readme(output_root: Path, target: str) -> None:
     content = [
         "# UT Run Output",
@@ -986,10 +1017,11 @@ def main() -> int:
 
     coverage_overviews: list[CoverageOverview] = []
     if args.coverage and included_suites:
-        env = build_gcc14_env(args.gcc_root)
+        product_build_dir = ensure_product_coverage_build(args, output_root)
+        env = build_gcc14_env(args.gcc_root, native_build_dir=product_build_dir)
         coverage_overviews = compute_product_coverage_overviews(
             output_root=output_root,
-            build_dir=pick_runtime_build_dir(args),
+            build_dir=product_build_dir,
             env=env,
             included_suites=included_suites,
         )
