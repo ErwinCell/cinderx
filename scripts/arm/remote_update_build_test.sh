@@ -16,6 +16,7 @@ AUTOJIT="${AUTOJIT:-50}"
 SMOKE_AUTOJIT="${SMOKE_AUTOJIT:-10}"
 PARALLEL="${PARALLEL:-1}"
 SKIP_PYPERF="${SKIP_PYPERF:-0}"
+SKIP_ARM_RUNTIME_VALIDATION="${SKIP_ARM_RUNTIME_VALIDATION:-0}"
 SKIP_DEFAULT_PYPERF_GATES="${SKIP_DEFAULT_PYPERF_GATES:-0}"
 RECREATE_PYPERF_VENV="${RECREATE_PYPERF_VENV:-0}"
 AUTOJIT_GATE="${AUTOJIT_GATE:-$AUTOJIT}"
@@ -49,6 +50,10 @@ if [[ "$SKIP_DEFAULT_PYPERF_GATES" != "0" && "$SKIP_DEFAULT_PYPERF_GATES" != "1"
   echo "ERROR: SKIP_DEFAULT_PYPERF_GATES must be 0 or 1, got '$SKIP_DEFAULT_PYPERF_GATES'"
   exit 1
 fi
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" != "0" && "$SKIP_ARM_RUNTIME_VALIDATION" != "1" ]]; then
+  echo "ERROR: SKIP_ARM_RUNTIME_VALIDATION must be 0 or 1, got '$SKIP_ARM_RUNTIME_VALIDATION'"
+  exit 1
+fi
 
 mkdir -p "$WORKDIR" "$INCOMING_DIR" /root/work/arm-sync
 
@@ -61,7 +66,7 @@ run_extra_cmd() {
     return 0
   fi
   echo ">> $label"
-  env WORKDIR="$WORKDIR" DRIVER_VENV="$DRIVER_VENV" PYTHON="$DRIVER_VENV/bin/python" \
+  env WORKDIR="$WORKDIR" DRIVER_VENV="$DRIVER_VENV" VIRTUAL_ENV="$DRIVER_VENV" PATH="$DRIVER_VENV/bin:$PATH" PYTHON="$DRIVER_VENV/bin/python" \
     bash -lc "cd '$WORKDIR' && $cmd"
 }
 
@@ -90,13 +95,25 @@ echo ">> install wheel + pyperformance into driver venv"
 . "$DRIVER_VENV/bin/activate"
 PYTHONJIT=0 python -m pip install -q -U pip
 PYTHONJIT=0 python -m pip install -q --force-reinstall "$WHEEL"
+
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" && "$SKIP_PYPERF" == "1" ]]; then
+  deactivate
+  run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
+  run_extra_cmd "extra verification command" "$EXTRA_VERIFY_CMD"
+  echo "compatibility-only validation requested; skipping pyperformance install, setup, and smoke."
+  exit 0
+fi
+
 PYTHONJIT=0 python -m pip install -q -U pyperformance
 
-echo ">> unittest: ARM runtime checks"
-if [[ -z "$ARM_RUNTIME_SKIP_TESTS" ]]; then
-  python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+if [[ "$SKIP_ARM_RUNTIME_VALIDATION" == "1" ]]; then
+  echo "SKIP_ARM_RUNTIME_VALIDATION=1 set; skipping built-in ARM runtime checks and JIT effectiveness smoke."
 else
-  env ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" python - <<'PY'
+  echo ">> unittest: ARM runtime checks"
+  if [[ -z "$ARM_RUNTIME_SKIP_TESTS" ]]; then
+    python cinderx/PythonLib/test_cinderx/test_arm_runtime.py
+  else
+    env ARM_RUNTIME_SKIP_TESTS="$ARM_RUNTIME_SKIP_TESTS" python - <<'PY'
 import importlib.util
 import os
 import pathlib
@@ -148,15 +165,13 @@ result = runner.run(filtered)
 if not result.wasSuccessful():
     raise SystemExit(1)
 PY
-fi
+  fi
 
-run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
-
-echo ">> smoke: JIT is effective (compiled code executes, not just 'enabled')"
-# We verify effectiveness by:
-# 1) Run a function in interpreted mode and observe interpreted call count increases.
-# 2) Force-compile it and observe the interpreted call count stops increasing while the function still runs.
-env PYTHONJITAUTO=1000000 python - <<'PY'
+  echo ">> smoke: JIT is effective (compiled code executes, not just 'enabled')"
+  # We verify effectiveness by:
+  # 1) Run a function in interpreted mode and observe interpreted call count increases.
+  # 2) Force-compile it and observe the interpreted call count stops increasing while the function still runs.
+  env PYTHONJITAUTO=1000000 python - <<'PY'
 import cinderx
 import cinderx.jit as jit
 
@@ -196,8 +211,10 @@ assert interp1 == interp0, (interp0, interp1)
 
 print("jit-effective-ok", "compiled_size", code_size, "interp_calls", interp1)
 PY
-deactivate
+  deactivate
+fi
 
+run_extra_cmd "extra test command" "$EXTRA_TEST_CMD"
 run_extra_cmd "extra verification command" "$EXTRA_VERIFY_CMD"
 
 echo ">> ensure pyperformance venv exists"
@@ -247,7 +264,7 @@ if [[ -z "$PYVENV_PATH" || ! -d "$PYVENV_PATH" ]]; then
 fi
 if [[ "$PYPERF_REQUIRE_SYSTEM_SITE_PACKAGES" == "1" ]]; then
   echo ">> normalize pyperformance venv to include system site-packages"
-  python - <<'PY' "$PYVENV_PATH/pyvenv.cfg"
+  python - "$PYVENV_PATH/pyvenv.cfg" <<'PY'
 from pathlib import Path
 import sys
 
@@ -358,7 +375,7 @@ MAIN_COMPILE_COUNT="$(grep -c "Finished compiling __main__:" "$LOG" || true)"
 TOTAL_COMPILE_COUNT="$(grep -c "Finished compiling " "$LOG" || true)"
 OTHER_COMPILE_COUNT=$((TOTAL_COMPILE_COUNT - MAIN_COMPILE_COUNT))
 COMPILE_SUMMARY_JSON="/root/work/arm-sync/${BENCH}_autojit${AUTOJIT_GATE}_${RUN_ID}_compile_summary.json"
-python - <<'PY' "$COMPILE_SUMMARY_JSON" "$BENCH" "$AUTOJIT_GATE" "$AUTOJIT_USE_JITLIST_FILTER" \
+python - "$COMPILE_SUMMARY_JSON" "$BENCH" "$AUTOJIT_GATE" "$AUTOJIT_USE_JITLIST_FILTER" <<'PY' \
   "$MAIN_COMPILE_COUNT" "$TOTAL_COMPILE_COUNT" "$OTHER_COMPILE_COUNT" "$LOG"
 import json
 import sys
