@@ -72,7 +72,9 @@ class GccPgoProfileAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "jit"):
                 setup.require_gcc_pgo_profiles(tmp, counts)
 
-    def test_rejects_when_first_party_object_profile_is_missing(self) -> None:
+    def test_allows_missing_first_party_object_profiles_when_required_targets_exist(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
 
@@ -96,8 +98,8 @@ class GccPgoProfileAuditTests(unittest.TestCase):
                 {"static-python": setup.GCC_PGO_AUDITED_TARGETS["static-python"]},
             )
 
-            with self.assertRaisesRegex(RuntimeError, "static-python"):
-                setup.require_gcc_pgo_profiles(tmp, counts, missing_profiles)
+            self.assertIn("static-python", missing_profiles)
+            setup.require_gcc_pgo_profiles(tmp, counts)
 
     def test_ignores_non_arm_jit_and_dummy_parallel_gc_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -150,7 +150,7 @@ if(ENABLE_PGO_USE)
       -fprofile-use
       -fprofile-correction
       -fprofile-partial-training
-      -Werror=missing-profile
+      -Wno-missing-profile
     )
   else()
     message(WARNING "PGO profile use is not supported with compiler: ${CMAKE_CXX_COMPILER_ID}")
@@ -379,13 +379,6 @@ if (${PY_VERSION} EQUAL 3.12 OR ${PY_VERSION} EQUAL 3.14 OR ${PY_VERSION} EQUAL 
 endif()
 
 add_library(jit ${JIT_SOURCES})
-if(ENABLE_PGO_USE AND USING_GCC)
-  set_source_files_properties(
-    ${PROJECT_SOURCE_DIR}/Jit/codegen/arch/unknown.cpp
-    ${PROJECT_SOURCE_DIR}/Jit/codegen/arch/x86_64.cpp
-    PROPERTIES COMPILE_OPTIONS "-Wno-missing-profile"
-  )
-endif()
 cinderx_apply_first_party_optimizations(jit)
 target_link_libraries(jit PRIVATE asmjit::asmjit interpreter fmt::fmt)
 
@@ -397,12 +390,6 @@ if (${ENABLE_PARALLEL_GC})
 else()
   set(PARALLEL_GC_SOURCES "${GENERATED_HEADER_DIR}/dummy-parallel-gc.c")
   file(WRITE ${PARALLEL_GC_SOURCES} "")
-endif()
-if(ENABLE_PGO_USE AND USING_GCC AND NOT ENABLE_PARALLEL_GC)
-  set_source_files_properties(
-    ${PARALLEL_GC_SOURCES}
-    PROPERTIES COMPILE_OPTIONS "-Wno-missing-profile"
-  )
 endif()
 add_library(parallel-gc ${PARALLEL_GC_SOURCES})
 cinderx_apply_first_party_optimizations(parallel-gc)

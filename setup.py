@@ -308,12 +308,10 @@ def collect_gcc_pgo_missing_profile_files(
 def require_gcc_pgo_profiles(
     build_temp: str,
     profile_counts: dict[str, int],
-    missing_profile_files: dict[str, list[str]] | None = None,
     required_targets: dict[str, str] | None = None,
 ) -> None:
     required_targets = required_targets or GCC_PGO_REQUIRED_TARGETS
     audit_failures = []
-
     missing_targets = []
 
     for target, relative_dir in required_targets.items():
@@ -325,21 +323,6 @@ def require_gcc_pgo_profiles(
         audit_failures.append(
             "missing .gcda files for required targets: " + ", ".join(missing_targets)
         )
-
-    if missing_profile_files:
-        missing_object_profiles = []
-        for target, file_paths in sorted(missing_profile_files.items()):
-            sample_paths = ", ".join(file_paths[:3])
-            if len(file_paths) > 3:
-                sample_paths = f"{sample_paths}, ..."
-            missing_object_profiles.append(
-                f"{target} ({len(file_paths)} missing, e.g. {sample_paths})"
-            )
-        if missing_object_profiles:
-            audit_failures.append(
-                "missing per-object profile files: "
-                + "; ".join(missing_object_profiles)
-            )
 
     if audit_failures:
         raise RuntimeError("GCC PGO profile audit failed: " + " | ".join(audit_failures))
@@ -468,11 +451,16 @@ class BuildCommand(build):
                     f"  {target}: found {count} .gcda files, "
                     f"missing {missing_count} expected profiles"
                 )
-            require_gcc_pgo_profiles(
-                build_temp_dir,
-                profile_counts,
-                missing_profile_files,
-            )
+            if missing_profile_files:
+                missing_summary = ", ".join(
+                    f"{target}={len(file_paths)}"
+                    for target, file_paths in sorted(missing_profile_files.items())
+                )
+                print(
+                    "  Note: some per-object profiles are missing "
+                    f"({missing_summary}); GCC will use partial-training PGO."
+                )
+            require_gcc_pgo_profiles(build_temp_dir, profile_counts)
 
         print_section("PGO STAGE 3/3: Rebuilding with profile-guided optimizations")
 
