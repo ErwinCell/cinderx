@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_test_suites import (  # noqa: E402
     CoverageOverview,
     SuiteRunSummary,
+    build_python_env,
     build_runtime_gtest_filter,
     build_gcc14_env,
     classify_pythonlib_result,
@@ -97,6 +98,12 @@ class PathAndEnvTests(unittest.TestCase):
         self.assertTrue(env["CC"].endswith("/usr/bin/gcc"))
         self.assertTrue(env["CXX"].endswith("/usr/bin/g++"))
         self.assertTrue(env["GCOV"].endswith("/usr/bin/gcov"))
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+
+    def test_build_python_env_prefers_native_build_dir(self) -> None:
+        env = build_python_env(native_build_dir=Path("/tmp/native-build"))
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+        self.assertTrue(env["PYTHONPATH"].split(":")[0].endswith("/tmp/native-build"))
 
     def test_build_gcc14_env_supports_flat_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

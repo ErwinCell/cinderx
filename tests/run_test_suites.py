@@ -305,9 +305,11 @@ def build_runtime_gtest_filter(patterns: list[str]) -> str | None:
     return ":".join(patterns)
 
 
-def build_python_env() -> dict[str, str]:
+def build_python_env(*, native_build_dir: Path | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    env["PYTHONNOUSERSITE"] = "1"
     pythonpath_entries = [
+        *([str(native_build_dir)] if native_build_dir is not None else []),
         str(REPO_ROOT / "cinderx" / "PythonLib"),
         str(REPO_ROOT / "cinderx"),
     ]
@@ -331,11 +333,8 @@ def pick_gcc_bin_dir(gcc_root: Path) -> Path:
 
 
 def build_gcc14_env(gcc_root: Path, *, native_build_dir: Path | None = None) -> dict[str, str]:
-    env = build_python_env()
+    env = build_python_env(native_build_dir=native_build_dir)
     bin_dir = pick_gcc_bin_dir(gcc_root)
-
-    if native_build_dir is not None:
-        prepend_env(env, "PYTHONPATH", str(native_build_dir))
 
     direct_layout = bin_dir.parent == gcc_root
     if direct_layout:
@@ -438,13 +437,12 @@ def run_pythonlib(
 ) -> tuple[int, list[str], SuiteRunSummary]:
     python_dir = ensure_dir(output_root / "pythonlib")
     logs_dir = ensure_dir(python_dir / "logs")
-    build_dir: Path | None = None
+    build_dir = pick_runtime_build_dir(args)
 
     if args.coverage:
-        build_dir = pick_runtime_build_dir(args)
         env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
     else:
-        env = build_python_env()
+        env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
 
     tests = list_pythonlib_tests(args, env)
 
@@ -460,29 +458,28 @@ def run_pythonlib(
         )
         return 0, tests, summary
 
-    if args.coverage:
-        assert build_dir is not None
-        build_rc = maybe_build_native(
-            output_dir=python_dir,
-            env=env,
-            build_dir=build_dir,
-            build_runtime_tests=False,
-            targets=["_cinderx"],
-            coverage=True,
-            skip_build=args.no_build,
+    build_rc = maybe_build_native(
+        output_dir=python_dir,
+        env=env,
+        build_dir=build_dir,
+        build_runtime_tests=False,
+        targets=["_cinderx"],
+        coverage=args.coverage,
+        skip_build=args.no_build,
+    )
+    if build_rc != 0:
+        summary = SuiteRunSummary(
+            name="pythonlib",
+            total=len(tests),
+            counts={"BUILD_FAILED": 1},
+            output_dir=str(python_dir),
+            artifacts=[
+                str(python_dir / "configure.log"),
+                str(python_dir / "build.log"),
+            ],
         )
-        if build_rc != 0:
-            summary = SuiteRunSummary(
-                name="pythonlib",
-                total=len(tests),
-                counts={"BUILD_FAILED": 1},
-                output_dir=str(python_dir),
-                artifacts=[
-                    str(python_dir / "configure.log"),
-                    str(python_dir / "build.log"),
-                ],
-            )
-            return build_rc, tests, summary
+        return build_rc, tests, summary
+    if args.coverage:
         clear_gcda_files(build_dir)
 
     results: list[CaseResult] = []
@@ -514,7 +511,6 @@ def run_pythonlib(
         str(python_dir / "tests.json"),
     ]
     if args.coverage:
-        assert build_dir is not None
         collect_cpp_coverage(python_dir, build_dir, env)
         artifacts.extend(
             [
