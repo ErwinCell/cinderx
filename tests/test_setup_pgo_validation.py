@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import setup
 
@@ -41,6 +42,49 @@ class PgoRuntimeValidationTests(unittest.TestCase):
             "did not initialize",
         ):
             setup.validate_pgo_runtime(_DummyCinderXModule(initialized=False))
+
+
+class PgoWorkloadCommandTests(unittest.TestCase):
+    def test_defaults_to_cpython_pgo_workload(self) -> None:
+        self.assertEqual(setup.get_pgo_workload({}), setup.PGO_WORKLOAD_CPYTHON)
+
+    def test_accepts_custom_command_pgo_workload(self) -> None:
+        self.assertEqual(
+            setup.get_pgo_workload({"CINDERX_PGO_WORKLOAD": "custom-command"}),
+            setup.PGO_WORKLOAD_CUSTOM_COMMAND,
+        )
+
+    def test_rejects_unknown_pgo_workload(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "Unsupported CINDERX_PGO_WORKLOAD"):
+            setup.get_pgo_workload({"CINDERX_PGO_WORKLOAD": "surprise"})
+
+    def test_builds_custom_workload_command(self) -> None:
+        cmd = setup.build_custom_pgo_workload_command(
+            {"CINDERX_PGO_WORKLOAD_CMD": "python -c 'print(42)'"}
+        )
+
+        self.assertEqual(cmd, ["python", "-c", "print(42)"])
+
+    def test_rejects_missing_custom_workload_command(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "CINDERX_PGO_WORKLOAD_CMD"):
+            setup.build_custom_pgo_workload_command({})
+
+    def test_builds_validating_custom_workload(self) -> None:
+        with patch.dict(
+            setup.os.environ,
+            {
+                "CINDERX_PGO_WORKLOAD_CMD": "python -c 'print(42)'",
+            },
+            clear=False,
+        ):
+            cmd = setup.build_pgo_workload_command(
+                "scratch/temp",
+                setup.PGO_WORKLOAD_CUSTOM_COMMAND,
+            )
+
+        self.assertEqual(cmd[:2], [setup.sys.executable, "-c"])
+        self.assertIn("validate_pgo_runtime", cmd[2])
+        self.assertIn("print(42)", cmd[2])
 
 
 class GccPgoProfileAuditTests(unittest.TestCase):

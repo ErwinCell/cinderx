@@ -13,6 +13,7 @@ import os
 import os.path
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -54,6 +55,12 @@ GCC_PGO_IGNORED_PROFILE_SUFFIXES = (
     os.path.join("cinderx", "Jit", "codegen", "arch", "x86_64.cpp.gcda"),
     os.path.join("generated", "dummy-parallel-gc.c.gcda"),
 )
+PGO_WORKLOAD_CPYTHON = "cpython-pgo"
+PGO_WORKLOAD_CUSTOM_COMMAND = "custom-command"
+PGO_WORKLOADS = {
+    PGO_WORKLOAD_CPYTHON,
+    PGO_WORKLOAD_CUSTOM_COMMAND,
+}
 
 
 def compute_package_version() -> str:
@@ -230,7 +237,62 @@ def validate_pgo_runtime(cinderx_module: object) -> None:
         )
 
 
-def build_pgo_workload_command() -> list[str]:
+def get_pgo_workload(env: dict[str, str] | None = None) -> str:
+    if env is None:
+        env = os.environ
+    workload = env.get("CINDERX_PGO_WORKLOAD", PGO_WORKLOAD_CPYTHON)
+    workload = workload.strip().lower()
+    if workload in {"", "default"}:
+        workload = PGO_WORKLOAD_CPYTHON
+
+    if workload not in PGO_WORKLOADS:
+        valid = ", ".join(sorted(PGO_WORKLOADS))
+        raise RuntimeError(
+            f"Unsupported CINDERX_PGO_WORKLOAD={workload!r}; expected one of: {valid}"
+        )
+
+    return workload
+
+
+def build_custom_pgo_workload_command(
+    env: dict[str, str] | None = None,
+) -> list[str]:
+    if env is None:
+        env = os.environ
+    raw_cmd = env.get("CINDERX_PGO_WORKLOAD_CMD", "").strip()
+    if not raw_cmd:
+        raise RuntimeError(
+            "CINDERX_PGO_WORKLOAD=custom-command requires "
+            "CINDERX_PGO_WORKLOAD_CMD"
+        )
+    return shlex.split(raw_cmd)
+
+
+def _build_validating_pgo_command(workload_cmd: list[str]) -> list[str]:
+    workload_script = textwrap.dedent(
+        f"""
+        import subprocess
+        import sys
+
+        import cinderx
+        from setup import validate_pgo_runtime
+
+        validate_pgo_runtime(cinderx)
+        cmd = {workload_cmd!r}
+        raise SystemExit(subprocess.run(cmd, check=False).returncode)
+        """
+    )
+    return [sys.executable, "-c", workload_script]
+
+
+def build_pgo_workload_command(
+    build_temp: str | None = None,
+    workload: str | None = None,
+) -> list[str]:
+    workload = workload or get_pgo_workload()
+    if workload == PGO_WORKLOAD_CUSTOM_COMMAND:
+        return _build_validating_pgo_command(build_custom_pgo_workload_command())
+
     workload_script = textwrap.dedent(
         """
         import sys
@@ -370,6 +432,8 @@ class BuildCommand(build):
 
         cc, _ = get_compiler()
         is_clang = "clang" in cc
+        pgo_workload = get_pgo_workload()
+        print(f"Using PGO workload: {pgo_workload}")
 
         print_section("PGO STAGE 1/3: Building with profile generation instrumentation")
 
@@ -400,8 +464,7 @@ class BuildCommand(build):
             pythonpath_entries.append(existing_pythonpath)
         workload_env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
 
-        # Uses the same default workload as CPython's PGO.
-        workload_cmd = build_pgo_workload_command()
+        workload_cmd = build_pgo_workload_command(self.build_temp, pgo_workload)
 
         print(f"Running workload with PYTHONPATH={workload_env['PYTHONPATH']}")
         workload_args = {

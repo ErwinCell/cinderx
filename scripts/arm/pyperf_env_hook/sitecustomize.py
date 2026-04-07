@@ -75,7 +75,9 @@ if worker and not skip and os.environ.get("CINDERX_DISABLE") in (None, "", "0"):
 
         if os.environ.get("PYTHONJITDISABLE") in (None, "", "0"):
             jit.enable()
-            if _is_truthy(os.environ.get("CINDERX_ENABLE_SPECIALIZED_OPCODES")):
+            if _is_truthy(
+                os.environ.get("CINDERX_ENABLE_SPECIALIZED_OPCODES")
+            ) or _is_truthy(os.environ.get("PYTHONJITSPECIALIZEDOPCODES")):
                 jit.enable_specialized_opcodes()
             entries = os.environ.get("CINDERX_JITLIST_ENTRIES", "")
             if entries:
