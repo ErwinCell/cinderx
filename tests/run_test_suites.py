@@ -7,10 +7,13 @@ import argparse
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import fnmatch
+import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import subprocess
+import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +21,7 @@ WORKSPACE_ROOT = REPO_ROOT.parent
 TESTSCRIPTS_RUNNER = REPO_ROOT / "cinderx" / "TestScripts" / "cinder_test_runner312.py"
 DEFAULT_PYTHON = "python3"
 DEFAULT_GCC_ROOT = Path("/opt/gcc-14")
+DEFAULT_PY_VERSION = "3.14"
 
 
 @dataclass
@@ -44,6 +48,33 @@ class CoverageOverview:
     covered: int
     total: int
     percent: float
+
+
+def load_compat_module():
+    compat_path = REPO_ROOT / "cinderx" / "PythonLib" / "cinderx" / "_compat.py"
+    spec = importlib.util.spec_from_file_location("cinderx_test_runner_compat", compat_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load compatibility policy from {compat_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def is_oss_feature_enabled(py_version: str, machine: str, feature: str) -> bool:
+    return bool(load_compat_module().is_oss_feature_enabled(py_version, machine, feature))
+
+
+def compute_cmake_feature_options(py_version: str) -> dict[str, str]:
+    machine = platform.machine()
+    return {
+        "ENABLE_ADAPTIVE_STATIC_PYTHON": (
+            "ON" if is_oss_feature_enabled(py_version, machine, "adaptive_static_python") else "OFF"
+        ),
+        "ENABLE_LIGHTWEIGHT_FRAMES": (
+            "ON" if is_oss_feature_enabled(py_version, machine, "lightweight_frames") else "OFF"
+        ),
+    }
 
 
 def default_output_root() -> Path:
@@ -590,9 +621,11 @@ def maybe_build_native(
         str(REPO_ROOT),
         "-B",
         str(build_dir),
-        "-DPY_VERSION=3.14",
+        f"-DPY_VERSION={DEFAULT_PY_VERSION}",
         f"-DBUILD_RUNTIME_TESTS={'ON' if build_runtime_tests else 'OFF'}",
     ]
+    for name, value in compute_cmake_feature_options(DEFAULT_PY_VERSION).items():
+        configure_cmd.append(f"-D{name}={value}")
     if coverage:
         configure_cmd.extend(
             [

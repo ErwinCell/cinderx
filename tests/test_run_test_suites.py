@@ -13,6 +13,7 @@ from run_test_suites import (  # noqa: E402
     build_gcc14_env,
     classify_pythonlib_result,
     classify_runtime_result,
+    compute_cmake_feature_options,
     default_gcov_inputs,
     default_output_root,
     format_finish_summary,
@@ -155,6 +156,15 @@ class PathAndEnvTests(unittest.TestCase):
             pick_product_build_dir(_Args()),
             Path(__file__).resolve().parent.parent / "build-pythonlib-gcc14-cov",
         )
+
+    def test_compute_cmake_feature_options_contains_expected_keys(self) -> None:
+        options = compute_cmake_feature_options("3.14")
+        self.assertEqual(
+            set(options),
+            {"ENABLE_ADAPTIVE_STATIC_PYTHON", "ENABLE_LIGHTWEIGHT_FRAMES"},
+        )
+        self.assertIn(options["ENABLE_ADAPTIVE_STATIC_PYTHON"], {"ON", "OFF"})
+        self.assertIn(options["ENABLE_LIGHTWEIGHT_FRAMES"], {"ON", "OFF"})
 
 
 class BannerAndSummaryTests(unittest.TestCase):

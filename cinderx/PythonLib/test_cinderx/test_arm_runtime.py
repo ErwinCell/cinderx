@@ -1100,8 +1100,6 @@ class ArmRuntimeTests(unittest.TestCase):
     def test_attr_derived_monomorphic_method_load_restores_inlining(self) -> None:
         if sys.version_info < (3, 14):
             self.skipTest("requires Python 3.14 LOAD_ATTR_METHOD_WITH_VALUES")
-        if not cinderx.is_lightweight_frames_enabled():
-            self.skipTest("requires lightweight frame support for HIR inlining")
 
         # Regression guard:
         # attr-derived receivers such as self.reference.find(update) may be
@@ -1663,8 +1661,6 @@ class ArmRuntimeTests(unittest.TestCase):
             self.assertTrue(proc.stdout.strip().isdigit(), proc.stdout)
 
     def test_autojit0_lightweight_frame_typing_import_smoke(self) -> None:
-        if not cinderx.is_lightweight_frames_enabled():
-            self.skipTest("requires lightweight frame support")
         # Regression guard:
         # with lightweight frames enabled, this sequence should not segfault
         # while importing typing from JIT-compiled execution.
@@ -1681,13 +1677,21 @@ class ArmRuntimeTests(unittest.TestCase):
             with open(script, "w", encoding="utf-8") as fp:
                 fp.write(code)
 
-            env = dict(os.environ)
-            env.update(
-                {
-                    "PYTHONJITAUTO": "0",
-                    "PYTHONJITLIGHTWEIGHTFRAME": "1",
-                }
-            )
+            env = {
+                key: value
+                for key in (
+                    "PYTHONPATH",
+                    "LD_LIBRARY_PATH",
+                    "PATH",
+                    "HOME",
+                    "TMPDIR",
+                    "TEMP",
+                    "TMP",
+                )
+                if (value := os.environ.get(key))
+            }
+            env["PYTHONJITAUTO"] = "0"
+            env["PYTHONJITLIGHTWEIGHTFRAME"] = "1"
             proc = subprocess.run(
                 [sys.executable, script],
                 stdout=subprocess.PIPE,
