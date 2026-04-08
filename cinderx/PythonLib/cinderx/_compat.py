@@ -24,7 +24,7 @@ _FAMILY_POLICIES: dict[str, FamilyPolicy] = {
         default_build_patch="3.14.3",
         publish_wheels=True,
         arm64_enabled_features=frozenset(
-            {"adaptive_static_python", "lightweight_frames"}
+            {"lightweight_frames"}
         ),
     ),
     "3.15": FamilyPolicy(
