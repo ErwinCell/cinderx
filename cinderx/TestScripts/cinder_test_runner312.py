@@ -835,7 +835,7 @@ def patch_libregrtest_save_env_jit_suppress():
         try:
             return orig_exit(self, *args, **kwargs)
         finally:
-            cinderx.jit.compile_after_n_calls(old_threshold)
+            cinderx.jit.compile_after_n_calls(0 if old_threshold is None else old_threshold)
 
     cls.__exit__ = patched_exit
 
