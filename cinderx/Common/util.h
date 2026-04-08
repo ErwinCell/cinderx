@@ -93,6 +93,19 @@ const char* ss_get_string(const auto_jit_string_t& ss);
 struct LoadMethodResult {
   LoadMethodResult() = default;
   LoadMethodResult(PyObject* none_or_callable, PyObject* inst_or_callable) {
+#if CINDERX_CPYTHON_314_ONLY
+    if (none_or_callable == nullptr) {
+      JIT_CHECK(
+          inst_or_callable == nullptr, "Error, both args should be nullptr");
+      callable = self_or_null = nullptr;
+    } else if (none_or_callable == Py_None) {
+      callable = inst_or_callable;
+      self_or_null = nullptr;
+    } else {
+      callable = none_or_callable;
+      self_or_null = inst_or_callable;
+    }
+#else
     if constexpr (PY_VERSION_HEX >= 0x030E0000) {
       if (none_or_callable == nullptr) {
         JIT_CHECK(
@@ -109,6 +122,7 @@ struct LoadMethodResult {
       callable = none_or_callable;
       self_or_null = inst_or_callable;
     }
+#endif
   }
   PyObject* callable;
   PyObject* self_or_null;

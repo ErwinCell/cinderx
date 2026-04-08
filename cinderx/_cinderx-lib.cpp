@@ -880,7 +880,11 @@ int cinderx_func_watcher(
     case PyFunction_EVENT_CREATE:
       // Update the new function's vectorcall to have it run with Static Python
       // if it needs to.
-      func->vectorcall = getInterpretedVectorcall(func);
+      if constexpr (kStaticPythonEnabled) {
+        func->vectorcall = getInterpretedVectorcall(func);
+      } else {
+        func->vectorcall = Ci_PyFunction_Vectorcall;
+      }
       scheduleCompile(func);
       break;
     case PyFunction_EVENT_MODIFY_CODE:
@@ -972,8 +976,10 @@ void initCinderHooks() {
       reinterpret_cast<Ci_TypeCallback>(jit::typeNameModified);
 
   Ci_hook_JIT_GetFrame = _PyJIT_GetFrame;
-  Ci_hook_PyCMethod_New = Ci_PyCMethod_New_METH_TYPED;
-  Ci_hook_PyDescr_NewMethod = Ci_PyDescr_NewMethod_METH_TYPED;
+  if constexpr (kStaticPythonEnabled) {
+    Ci_hook_PyCMethod_New = Ci_PyCMethod_New_METH_TYPED;
+    Ci_hook_PyDescr_NewMethod = Ci_PyDescr_NewMethod_METH_TYPED;
+  }
   Ci_hook_WalkStack = Ci_WalkStack;
   Ci_hook_code_sizeof_shadowcode = shadowcode_code_sizeof;
   Ci_hook_PyJIT_GenVisitRefs = _PyJIT_GenVisitRefs;
@@ -982,7 +988,9 @@ void initCinderHooks() {
   Ci_hook_PyJIT_GenYieldFromValue = _PyJIT_GenYieldFromValue;
   Ci_hook_PyJIT_GenMaterializeFrame = _PyJIT_GenMaterializeFrame;
   Ci_hook__PyShadow_FreeAll = _PyShadow_FreeAll;
-  Ci_hook_MaybeStrictModule_Dict = Ci_MaybeStrictModule_Dict;
+  if constexpr (kStaticPythonEnabled) {
+    Ci_hook_MaybeStrictModule_Dict = Ci_MaybeStrictModule_Dict;
+  }
   Ci_hook_PyJIT_GetFrame = _PyJIT_GetFrame;
   Ci_hook_PyJIT_GetBuiltins = _PyJIT_GetBuiltins;
   Ci_hook_PyJIT_GetGlobals = _PyJIT_GetGlobals;
@@ -1506,27 +1514,30 @@ int _cinderx_exec_impl(PyObject* m) {
 
 #undef ADDITEM
 
-  // We don't want a low level callback which is called pretty late after
-  // sys.modules has been cleared. Instead we want to be called before that
-  // happens so we can clear out strict modules first, so we register
-  // directly with the atexit library.
-  auto atexit = Ref<>::steal(PyImport_ImportModule("atexit"));
-  if (atexit == nullptr) {
-    return -1;
-  }
-  auto register_func = Ref<>::steal(PyObject_GetAttrString(atexit, "register"));
-  if (register_func == nullptr) {
-    return -1;
-  }
-  auto clear_strict_modules_func =
-      Ref<>::steal(PyObject_GetAttrString(m, "_clear_strict_modules"));
-  if (clear_strict_modules_func == nullptr) {
-    return -1;
-  }
-  auto res = Ref<>::steal(
-      PyObject_CallOneArg(register_func, clear_strict_modules_func));
-  if (res == nullptr) {
-    return -1;
+  if constexpr (kStaticPythonEnabled) {
+    // We don't want a low level callback which is called pretty late after
+    // sys.modules has been cleared. Instead we want to be called before that
+    // happens so we can clear out strict modules first, so we register
+    // directly with the atexit library.
+    auto atexit = Ref<>::steal(PyImport_ImportModule("atexit"));
+    if (atexit == nullptr) {
+      return -1;
+    }
+    auto register_func =
+        Ref<>::steal(PyObject_GetAttrString(atexit, "register"));
+    if (register_func == nullptr) {
+      return -1;
+    }
+    auto clear_strict_modules_func =
+        Ref<>::steal(PyObject_GetAttrString(m, "_clear_strict_modules"));
+    if (clear_strict_modules_func == nullptr) {
+      return -1;
+    }
+    auto res = Ref<>::steal(
+        PyObject_CallOneArg(register_func, clear_strict_modules_func));
+    if (res == nullptr) {
+      return -1;
+    }
   }
 
   if constexpr (PY_VERSION_HEX >= 0x030C0000) {
@@ -1592,15 +1603,17 @@ int _cinderx_exec_impl(PyObject* m) {
 #endif
 
 #ifdef ENABLE_XXCLASSLOADER
-  if (_Ci_CreateXXClassLoaderModule() < 0) {
-    return -1;
+  if constexpr (kStaticPythonEnabled) {
+    if (_Ci_CreateXXClassLoaderModule() < 0) {
+      return -1;
+    }
   }
 #endif
 
-  // Keep _static module available for Python-level compatibility even when
-  // static-python optimization paths are disabled.
-  if (_Ci_CreateStaticModule() < 0) {
-    return -1;
+  if constexpr (kStaticPythonEnabled) {
+    if (_Ci_CreateStaticModule() < 0) {
+      return -1;
+    }
   }
   if (Ci_InitFrameEvalFunc() < 0) {
     return -1;

@@ -70,15 +70,22 @@ static inline int PyTime_MonotonicRaw(PyTime_t* result) {
 
 // Fetch a _PyInterpreterFrame from a PyThreadState.
 inline _PyInterpreterFrame* interpFrameFromThreadState(PyThreadState* tstate) {
+#if CINDERX_CPYTHON_314_ONLY
+  return tstate->current_frame;
+#else
 #if PY_VERSION_HEX >= 0x030D0000
   return tstate->current_frame;
 #else
   return tstate->cframe->current_frame;
 #endif
+#endif
 }
 
 // Get the interpreter frame stored in a generator object.
 inline _PyInterpreterFrame* generatorFrame(PyGenObject* gen) {
+#if CINDERX_CPYTHON_314_ONLY
+  return &gen->gi_iframe;
+#else
   return
 #if PY_VERSION_HEX >= 0x030E0000
       &gen->gi_iframe
@@ -86,37 +93,57 @@ inline _PyInterpreterFrame* generatorFrame(PyGenObject* gen) {
       (_PyInterpreterFrame*)(gen->gi_iframe)
 #endif
       ;
+#endif
 }
 
 // Get the current interpreter frame from a thread state.
 inline _PyInterpreterFrame* currentFrame(PyThreadState* tstate) {
+#if CINDERX_CPYTHON_314_ONLY
+  return tstate->current_frame;
+#else
 #if PY_VERSION_HEX >= 0x030D0000
   return tstate->current_frame;
 #else
   return tstate->cframe->current_frame;
 #endif
+#endif
 }
 
 // Set the current interpreter frame in a thread state.
 inline void setCurrentFrame(PyThreadState* tstate, _PyInterpreterFrame* frame) {
+#if CINDERX_CPYTHON_314_ONLY
+  tstate->current_frame = frame;
+#else
 #if PY_VERSION_HEX >= 0x030D0000
   tstate->current_frame = frame;
 #else
   tstate->cframe->current_frame = frame;
 #endif
+#endif
 }
 
 static inline PyObject* frameFunction(_PyInterpreterFrame* frame) {
+#if CINDERX_CPYTHON_314_ONLY
+  return PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
+#else
 #if PY_VERSION_HEX >= 0x030E0000
   return PyStackRef_AsPyObjectBorrow(frame->f_funcobj);
 #else
   return frame->f_funcobj;
+#endif
 #endif
 }
 
 static inline void setFrameFunction(
     _PyInterpreterFrame* frame,
     PyObject* func) {
+#if CINDERX_CPYTHON_314_ONLY
+  if (func != NULL) {
+    frame->f_funcobj = PyStackRef_FromPyObjectSteal(func);
+  } else {
+    frame->f_funcobj = PyStackRef_NULL;
+  }
+#else
 #if PY_VERSION_HEX >= 0x030E0000
   if (func != NULL) {
     frame->f_funcobj = PyStackRef_FromPyObjectSteal(func);
@@ -126,13 +153,18 @@ static inline void setFrameFunction(
 #else
   frame->f_funcobj = (PyObject*)func;
 #endif
+#endif
 }
 
 inline void setFrameInstruction(_PyInterpreterFrame* frame, _Py_CODEUNIT* loc) {
+#if CINDERX_CPYTHON_314_ONLY
+  frame->instr_ptr = loc;
+#else
 #if PY_VERSION_HEX >= 0x030E0000
   frame->instr_ptr = loc;
 #else
   frame->prev_instr = loc;
+#endif
 #endif
 }
 
@@ -163,6 +195,9 @@ inline void setFrameInstruction(_PyInterpreterFrame* frame, _Py_CODEUNIT* loc) {
 #define FRAME_INSTR_OFFSET offsetof(_PyInterpreterFrame, instr_ptr)
 
 static inline PyCodeObject* frameCode(_PyInterpreterFrame* frame) {
+#if CINDERX_CPYTHON_314_ONLY
+  return (PyCodeObject*)PyStackRef_AsPyObjectBorrow(frame->f_executable);
+#else
 #if defined(ENABLE_LIGHTWEIGHT_FRAMES) && PY_VERSION_HEX >= 0x030F0000
   PyObject* executable = PyStackRef_AsPyObjectBorrow(frame->f_executable);
   if (PyUnstable_JITExecutable_Check(executable)) {
@@ -170,6 +205,7 @@ static inline PyCodeObject* frameCode(_PyInterpreterFrame* frame) {
   }
 #endif
   return (PyCodeObject*)PyStackRef_AsPyObjectBorrow(frame->f_executable);
+#endif
 }
 
 static inline void setFrameCode(_PyInterpreterFrame* frame, PyObject* code) {

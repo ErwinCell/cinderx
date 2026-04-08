@@ -68,6 +68,12 @@ using namespace jit;
 
 namespace {
 
+#if defined(CINDER_ENABLE_STATIC_PYTHON)
+constexpr bool kStaticPythonEnabled = true;
+#else
+constexpr bool kStaticPythonEnabled = false;
+#endif
+
 // RAII device for disabling GIL checking.
 class DisableGilCheck {
  public:
@@ -123,6 +129,9 @@ bool isCinderModule(BorrowedRef<> module_name) {
 }
 
 bool shouldAlwaysScheduleCompile(BorrowedRef<PyCodeObject> code) {
+  if constexpr (!kStaticPythonEnabled) {
+    return false;
+  }
   // There's a config option for forcing all Static Python functions to be
   // compiled.
   bool is_static = code->co_flags & CI_CO_STATICALLY_COMPILED;
@@ -3181,7 +3190,10 @@ Result compile_func(BorrowedRef<PyFunctionObject> func) {
     }
 
     // Don't compile functions that were preloaded purely for inlining.
-    bool is_static = preloader->code()->co_flags & CI_CO_STATICALLY_COMPILED;
+    bool is_static = false;
+    if constexpr (kStaticPythonEnabled) {
+      is_static = preloader->code()->co_flags & CI_CO_STATICALLY_COMPILED;
+    }
     if (target != func && !is_static) {
       continue;
     }
