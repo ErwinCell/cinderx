@@ -470,6 +470,14 @@ def list_pythonlib_tests(args: argparse.Namespace, env: dict[str, str]) -> list[
     return [test for test in tests if matches_any(test, args.filter)]
 
 
+def pythonlib_module_env(module: str) -> dict[str, str]:
+    if module == "test_cinderx.test_jit_frame":
+        return {"PYTHONJITLIGHTWEIGHTFRAME": "0"}
+    if module == "test.test_code":
+        return {"CINDERX_DISABLE_SAVE_ENV_JIT_SUPPRESS": "1"}
+    return {}
+
+
 def clear_gcda_files(build_dir: Path) -> None:
     for gcda in build_dir.rglob("*.gcda"):
         gcda.unlink()
@@ -523,7 +531,9 @@ def run_pythonlib(
         safe_name = sanitize_name(module)
         log_path = logs_dir / f"{safe_name}.log"
         cmd = [args.python_exe, str(TESTSCRIPTS_RUNNER), "test", "-t", module]
-        proc = run_command(cmd, cwd=REPO_ROOT, env=env)
+        module_env = env.copy()
+        module_env.update(pythonlib_module_env(module))
+        proc = run_command(cmd, cwd=REPO_ROOT, env=module_env)
         write_text(log_path, proc.stdout + proc.stderr)
         status, note = classify_pythonlib_result(proc)
         results.append(

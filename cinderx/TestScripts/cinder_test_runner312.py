@@ -840,6 +840,10 @@ def patch_libregrtest_save_env_jit_suppress():
     cls.__exit__ = patched_exit
 
 
+def should_patch_save_env_jit_suppress():
+    return os.environ.get("CINDERX_DISABLE_SAVE_ENV_JIT_SUPPRESS") != "1"
+
+
 def user_selected_main(args):
     sys.argv[1:] = args.rest[1:]
 
@@ -847,7 +851,8 @@ def user_selected_main(args):
 
     patch_libregrtest_to_use_loadTestsFromName()
     patch_libregrtest_os_environ_snapshot()
-    patch_libregrtest_save_env_jit_suppress()
+    if should_patch_save_env_jit_suppress():
+        patch_libregrtest_save_env_jit_suppress()
 
     fix_env_always_changed_issue()
 
@@ -881,7 +886,8 @@ def worker_main(args):
     sys.path.insert(0, str(get_cinderx_dir() / "PythonLib"))
     patch_libregrtest_to_use_loadTestsFromName()
     patch_libregrtest_os_environ_snapshot()
-    patch_libregrtest_save_env_jit_suppress()
+    if should_patch_save_env_jit_suppress():
+        patch_libregrtest_save_env_jit_suppress()
     libregrtest_setup.setup_process()
     with open(args.runtest_config_json_file, "r") as f:
         worker_runtests_dict = json.load(f)

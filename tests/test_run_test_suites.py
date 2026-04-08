@@ -26,6 +26,7 @@ from run_test_suites import (  # noqa: E402
     parse_gtest_list,
     parse_json_list,
     pick_gcc_bin_dir,
+    pythonlib_module_env,
     pick_runtime_build_dir,
 )
 
@@ -180,6 +181,21 @@ class PathAndEnvTests(unittest.TestCase):
         cmd = pythonlib_install_check_cmd("/opt/python-3.14.3/bin/python3.14")
         self.assertEqual(cmd[:2], ["/opt/python-3.14.3/bin/python3.14", "-c"])
         self.assertIn("import cinderx, _cinderx", cmd[2])
+
+    def test_pythonlib_module_env_for_jit_frame(self) -> None:
+        self.assertEqual(
+            pythonlib_module_env("test_cinderx.test_jit_frame"),
+            {"PYTHONJITLIGHTWEIGHTFRAME": "0"},
+        )
+
+    def test_pythonlib_module_env_for_other_module(self) -> None:
+        self.assertEqual(pythonlib_module_env("test.test_call"), {})
+
+    def test_pythonlib_module_env_for_test_code(self) -> None:
+        self.assertEqual(
+            pythonlib_module_env("test.test_code"),
+            {"CINDERX_DISABLE_SAVE_ENV_JIT_SUPPRESS": "1"},
+        )
 
 class BannerAndSummaryTests(unittest.TestCase):
     def test_format_start_banner_contains_effective_values(self) -> None:
