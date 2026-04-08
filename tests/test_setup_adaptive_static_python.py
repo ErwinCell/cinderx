@@ -82,5 +82,53 @@ class BuildEnvFlagTests(unittest.TestCase):
                     self.assertTrue(setup.is_env_flag_enabled("CINDERX_ENABLE_LTO"))
 
 
+class ArmCpuTuningCMakeArgTests(unittest.TestCase):
+    def test_arm_cpu_tuning_defaults_to_empty_cache_override(self) -> None:
+        self.assertEqual(
+            setup.get_arm_cpu_tuning_cmake_args({}),
+            ["-DCINDERX_ARM_CPU_TUNE=", "-DCINDERX_ARM_CPU_TUNE_OPTION=mcpu"],
+        )
+
+    def test_arm_cpu_tuning_uses_mcpu_by_default(self) -> None:
+        self.assertEqual(
+            setup.get_arm_cpu_tuning_cmake_args(
+                {"CINDERX_ARM_CPU_TUNE": "neoverse-n1"}
+            ),
+            [
+                "-DCINDERX_ARM_CPU_TUNE=neoverse-n1",
+                "-DCINDERX_ARM_CPU_TUNE_OPTION=mcpu",
+            ],
+        )
+
+    def test_arm_cpu_tuning_allows_mtune_override(self) -> None:
+        self.assertEqual(
+            setup.get_arm_cpu_tuning_cmake_args(
+                {
+                    "CINDERX_ARM_CPU_TUNE": "neoverse-v1",
+                    "CINDERX_ARM_CPU_TUNE_OPTION": "mtune",
+                }
+            ),
+            [
+                "-DCINDERX_ARM_CPU_TUNE=neoverse-v1",
+                "-DCINDERX_ARM_CPU_TUNE_OPTION=mtune",
+            ],
+        )
+
+    def test_arm_cpu_tuning_rejects_unknown_option(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CINDERX_ARM_CPU_TUNE_OPTION"):
+            setup.get_arm_cpu_tuning_cmake_args(
+                {
+                    "CINDERX_ARM_CPU_TUNE": "neoverse-n1",
+                    "CINDERX_ARM_CPU_TUNE_OPTION": "cpu",
+                }
+            )
+
+    def test_arm_cpu_tuning_rejects_unsafe_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "CINDERX_ARM_CPU_TUNE"):
+            setup.get_arm_cpu_tuning_cmake_args(
+                {"CINDERX_ARM_CPU_TUNE": "neoverse-n1;bad"}
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

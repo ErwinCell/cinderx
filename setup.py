@@ -18,6 +18,7 @@ import subprocess
 import sys
 import sysconfig
 import textwrap
+from collections.abc import Mapping
 from enum import Enum
 from functools import lru_cache
 from typing import Callable
@@ -33,6 +34,8 @@ SOURCE_DIR = "cinderx"
 PYTHON_LIB_DIR = "cinderx/PythonLib"
 
 MIN_GCC_VERSION = 13
+ARM_CPU_TUNE_OPTIONS = {"march", "mcpu", "mtune"}
+ARM_CPU_TUNE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.+:-]+$")
 GCC_PGO_AUDITED_TARGETS = {
     "_cinderx": os.path.join("CMakeFiles", "_cinderx.dir"),
     "borrowed": os.path.join("CMakeFiles", "borrowed.dir"),
@@ -202,6 +205,39 @@ def is_env_flag_enabled(var: str, default: bool = False) -> bool:
 
     # Preserve historical behavior: any unknown non-empty value means enabled.
     return True
+
+
+def get_arm_cpu_tuning_cmake_args(
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    if environ is None:
+        environ = os.environ
+
+    cpu_tune = environ.get("CINDERX_ARM_CPU_TUNE", "").strip()
+    cpu_tune_option = environ.get("CINDERX_ARM_CPU_TUNE_OPTION", "mcpu").strip()
+
+    if not cpu_tune:
+        # Always pass the empty value so reusing a CMakeCache does not keep a
+        # previous ARM CPU-specific build setting.
+        return ["-DCINDERX_ARM_CPU_TUNE=", "-DCINDERX_ARM_CPU_TUNE_OPTION=mcpu"]
+
+    if cpu_tune_option not in ARM_CPU_TUNE_OPTIONS:
+        valid_options = ", ".join(sorted(ARM_CPU_TUNE_OPTIONS))
+        raise ValueError(
+            "CINDERX_ARM_CPU_TUNE_OPTION must be one of "
+            f"{valid_options}, got {cpu_tune_option!r}"
+        )
+
+    if ARM_CPU_TUNE_VALUE_RE.fullmatch(cpu_tune) is None:
+        raise ValueError(
+            "CINDERX_ARM_CPU_TUNE may only contain letters, digits, '.', '_', "
+            f"'+', ':' or '-', got {cpu_tune!r}"
+        )
+
+    return [
+        f"-DCINDERX_ARM_CPU_TUNE={cpu_tune}",
+        f"-DCINDERX_ARM_CPU_TUNE_OPTION={cpu_tune_option}",
+    ]
 
 
 def validate_pgo_runtime(cinderx_module: object) -> None:
@@ -622,6 +658,18 @@ class BuildExt(build_ext):
             f"-DCMAKE_CXX_COMPILER={cxx}",
             f"-DCMAKE_VERBOSE_MAKEFILE:BOOL={verbose_makefile}",
         ]
+        cmake_args.extend(get_arm_cpu_tuning_cmake_args())
+
+        arm_cpu_tune = os.environ.get("CINDERX_ARM_CPU_TUNE", "").strip()
+        if arm_cpu_tune:
+            arm_cpu_tune_option = os.environ.get(
+                "CINDERX_ARM_CPU_TUNE_OPTION",
+                "mcpu",
+            ).strip()
+            print(
+                "Building first-party CinderX targets with ARM CPU tuning: "
+                f"-{arm_cpu_tune_option}={arm_cpu_tune}"
+            )
 
         if self.cinderx_pgo_stage == PgoStage.GENERATE:
             cmake_args.append("-DENABLE_PGO_GENERATE=ON")

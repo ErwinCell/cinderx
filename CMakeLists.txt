@@ -85,6 +85,27 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SHARED_FLAGS}")
 option(ENABLE_LTO "Enable Link-Time Optimization (full)" OFF)
 set(CINDERX_FIRST_PARTY_COMPILE_OPTIONS "")
 set(CINDERX_FIRST_PARTY_LINK_OPTIONS "")
+set(CINDERX_ARM_CPU_TUNE "" CACHE STRING "ARM CPU tuning value for first-party CinderX targets, e.g. native or neoverse-v1")
+set(CINDERX_ARM_CPU_TUNE_OPTION "mcpu" CACHE STRING "ARM CPU tuning compiler option: mcpu, mtune, or march")
+
+if(CINDERX_ARM_CPU_TUNE)
+  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" CINDERX_SYSTEM_PROCESSOR_LOWER)
+  if(NOT "${CINDERX_SYSTEM_PROCESSOR_LOWER}" MATCHES "^(aarch64|arm64)$")
+    message(FATAL_ERROR "CINDERX_ARM_CPU_TUNE is only supported for aarch64/arm64 builds")
+  endif()
+
+  if(NOT "${CINDERX_ARM_CPU_TUNE_OPTION}" MATCHES "^(mcpu|mtune|march)$")
+    message(FATAL_ERROR "CINDERX_ARM_CPU_TUNE_OPTION must be one of: mcpu, mtune, march")
+  endif()
+
+  string(REGEX MATCH "^[A-Za-z0-9_.+:-]+$" CINDERX_ARM_CPU_TUNE_VALID "${CINDERX_ARM_CPU_TUNE}")
+  if(NOT "${CINDERX_ARM_CPU_TUNE_VALID}" STREQUAL "${CINDERX_ARM_CPU_TUNE}")
+    message(FATAL_ERROR "CINDERX_ARM_CPU_TUNE contains unsupported characters: ${CINDERX_ARM_CPU_TUNE}")
+  endif()
+
+  list(APPEND CINDERX_FIRST_PARTY_COMPILE_OPTIONS "-${CINDERX_ARM_CPU_TUNE_OPTION}=${CINDERX_ARM_CPU_TUNE}")
+  message(STATUS "ARM CPU tuning: first-party CinderX targets use -${CINDERX_ARM_CPU_TUNE_OPTION}=${CINDERX_ARM_CPU_TUNE}")
+endif()
 
 if(ENABLE_LTO)
   # Only support Linux
