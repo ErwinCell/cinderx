@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 
@@ -369,6 +370,10 @@ def pick_gcc_bin_dir(gcc_root: Path) -> Path:
 
 def build_gcc14_env(gcc_root: Path, *, native_build_dir: Path | None = None) -> dict[str, str]:
     env = build_python_env(native_build_dir=native_build_dir)
+    return add_gcc14_toolchain_env(env, gcc_root)
+
+
+def add_gcc14_toolchain_env(env: dict[str, str], gcc_root: Path) -> dict[str, str]:
     bin_dir = pick_gcc_bin_dir(gcc_root)
 
     direct_layout = bin_dir.parent == gcc_root
@@ -406,6 +411,94 @@ def pythonlib_install_check_cmd(python_exe: str) -> list[str]:
         "-c",
         "import cinderx, _cinderx; print(_cinderx.__file__)",
     ]
+
+
+def pythonlib_pip_install_cmd(python_exe: str, *, prefix: Path | None = None) -> list[str]:
+    cmd = [python_exe, "-m", "pip", "install", "--force-reinstall", "--no-deps"]
+    if prefix is not None:
+        cmd.extend(["--prefix", str(prefix)])
+    cmd.append(".")
+    return cmd
+
+
+def pythonlib_install_build_base(
+    repo_root: Path = REPO_ROOT,
+    *,
+    coverage: bool,
+) -> Path:
+    return repo_root / ("scratch-pythonlib-cov" if coverage else "scratch")
+
+
+def pythonlib_install_prefix(output_root: Path) -> Path:
+    return output_root / "pythonlib-install-prefix"
+
+
+def pythonlib_install_site_packages(prefix: Path) -> Path:
+    return (
+        prefix
+        / "lib"
+        / f"python{DEFAULT_PY_VERSION}"
+        / "site-packages"
+    )
+
+
+def pythonlib_install_build_dir(
+    repo_root: Path = REPO_ROOT,
+    *,
+    coverage: bool,
+) -> Path | None:
+    candidates = sorted(
+        pythonlib_install_build_base(repo_root, coverage=coverage).glob(
+            f"temp.*-{sys.implementation.cache_tag}"
+        )
+    )
+    if not candidates:
+        return None
+    return candidates[-1]
+
+
+def pythonlib_install_env(
+    gcc_root: Path,
+    *,
+    coverage: bool,
+    prefix: Path | None = None,
+) -> dict[str, str]:
+    env = build_gcc14_env(gcc_root)
+    if prefix is not None:
+        site_packages = pythonlib_install_site_packages(prefix)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(site_packages), env["PYTHONPATH"]]
+        )
+    env["CINDERX_BUILD_BASE"] = str(
+        pythonlib_install_build_base(REPO_ROOT, coverage=coverage)
+    )
+    for name, value in compute_cmake_feature_options(DEFAULT_PY_VERSION).items():
+        env[name] = value
+    if coverage:
+        env["CFLAGS"] = "--coverage"
+        env["CXXFLAGS"] = "--coverage"
+        env["LDFLAGS"] = "--coverage"
+    return env
+
+
+def pythonlib_pip_install_env(
+    gcc_root: Path,
+    *,
+    coverage: bool,
+) -> dict[str, str]:
+    env = add_gcc14_toolchain_env(dict(os.environ), gcc_root)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONNOUSERSITE", None)
+    env["CINDERX_BUILD_BASE"] = str(
+        pythonlib_install_build_base(REPO_ROOT, coverage=coverage)
+    )
+    for name, value in compute_cmake_feature_options(DEFAULT_PY_VERSION).items():
+        env[name] = value
+    if coverage:
+        env["CFLAGS"] = "--coverage"
+        env["CXXFLAGS"] = "--coverage"
+        env["LDFLAGS"] = "--coverage"
+    return env
 
 
 def extract_pythonlib_note(output: str) -> str:
@@ -488,7 +581,66 @@ def run_pythonlib(
 ) -> tuple[int, list[str], SuiteRunSummary]:
     python_dir = ensure_dir(output_root / "pythonlib")
     logs_dir = ensure_dir(python_dir / "logs")
-    env = build_gcc14_env(args.gcc_root)
+    install_log = python_dir / "pip-install.log"
+    install_build_dir: Path | None = None
+    install_prefix: Path | None = None
+
+    if args.coverage:
+        install_prefix = pythonlib_install_prefix(output_root)
+        if not args.no_build:
+            shutil.rmtree(install_prefix, ignore_errors=True)
+            install_env = pythonlib_pip_install_env(args.gcc_root, coverage=True)
+            install_proc = run_command(
+                pythonlib_pip_install_cmd(args.python_exe, prefix=install_prefix),
+                cwd=REPO_ROOT,
+                env=install_env,
+            )
+            write_text(install_log, install_proc.stdout + install_proc.stderr)
+            if install_proc.returncode != 0:
+                summary = SuiteRunSummary(
+                    name="pythonlib",
+                    total=0,
+                    counts={"INSTALL_FAILED": 1},
+                    output_dir=str(python_dir),
+                    artifacts=[str(install_log)],
+                )
+                return install_proc.returncode, [], summary
+        install_build_dir = pythonlib_install_build_dir(coverage=True)
+        if not pythonlib_install_site_packages(install_prefix).exists():
+            install_hint = (
+                "pythonlib coverage requires an installed coverage build in the "
+                "temporary prefix. Run without `--no-build`, or install with "
+                "coverage flags first.\n"
+            )
+            write_text(install_log, install_hint)
+            summary = SuiteRunSummary(
+                name="pythonlib",
+                total=0,
+                counts={"INSTALL_REQUIRED": 1},
+                output_dir=str(python_dir),
+                artifacts=[str(install_log)],
+            )
+            return 1, [], summary
+        if install_build_dir is None:
+            install_hint = (
+                "pythonlib coverage requires an installed coverage build. "
+                "Run without `--no-build`, or install with coverage flags first.\n"
+            )
+            write_text(install_log, install_hint)
+            summary = SuiteRunSummary(
+                name="pythonlib",
+                total=0,
+                counts={"INSTALL_REQUIRED": 1},
+                output_dir=str(python_dir),
+                artifacts=[str(install_log)],
+            )
+            return 1, [], summary
+
+    env = pythonlib_install_env(
+        args.gcc_root,
+        coverage=False,
+        prefix=install_prefix,
+    )
 
     install_check_log = python_dir / "install-check.log"
     install_check = run_command(
@@ -526,6 +678,9 @@ def run_pythonlib(
         )
         return 0, tests, summary
 
+    if args.coverage and install_build_dir is not None:
+        clear_gcda_files(install_build_dir)
+
     results: list[CaseResult] = []
     for module in tests:
         safe_name = sanitize_name(module)
@@ -555,6 +710,20 @@ def run_pythonlib(
         str(python_dir / "summary.md"),
         str(python_dir / "tests.json"),
     ]
+    if args.coverage and install_build_dir is not None:
+        collect_cpp_coverage(python_dir, install_build_dir, build_gcc14_env(args.gcc_root))
+        write_runtime_index(python_dir, lcov_used=False)
+        artifacts.extend(
+            [
+                str(python_dir / "gcda-files.txt"),
+                str(python_dir / "gcov-summary.txt"),
+                str(python_dir / "index.md"),
+            ]
+        )
+    if args.coverage and install_log.exists():
+        artifacts.append(str(install_log))
+    if install_prefix is not None:
+        shutil.rmtree(install_prefix, ignore_errors=True)
 
     rc = 0 if all(result.status in {"PASSED", "SKIPPED", "NO_TESTS"} for result in results) else 1
     summary = SuiteRunSummary(
@@ -582,6 +751,11 @@ def pick_pythonlib_build_dir(args: argparse.Namespace) -> Path:
 
 
 def pick_product_build_dir(args: argparse.Namespace) -> Path:
+    target = getattr(args, "target", "all")
+    if args.coverage and target in {"all", "pythonlib"}:
+        build_dir = pythonlib_install_build_dir(coverage=True)
+        if build_dir is not None:
+            return build_dir
     return pick_pythonlib_build_dir(args)
 
 

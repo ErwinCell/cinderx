@@ -19,7 +19,14 @@ from run_test_suites import (  # noqa: E402
     format_finish_summary,
     format_start_banner,
     is_product_source,
+    pythonlib_install_build_base,
+    pythonlib_install_build_dir,
     pythonlib_install_check_cmd,
+    pythonlib_install_env,
+    pythonlib_install_prefix,
+    pythonlib_install_site_packages,
+    pythonlib_pip_install_env,
+    pythonlib_pip_install_cmd,
     pick_pythonlib_build_dir,
     pick_product_build_dir,
     product_source_roots,
@@ -154,9 +161,11 @@ class PathAndEnvTests(unittest.TestCase):
             runtime_build_dir = None
             coverage = True
 
-        self.assertEqual(
-            pick_product_build_dir(_Args()),
-            Path(__file__).resolve().parent.parent / "build-pythonlib-gcc14-cov",
+        build_dir = pick_product_build_dir(_Args())
+        repo_root = Path(__file__).resolve().parent.parent
+        self.assertTrue(
+            build_dir == repo_root / "build-pythonlib-gcc14-cov"
+            or repo_root / "scratch-pythonlib-cov" in build_dir.parents
         )
 
     def test_compute_cmake_feature_options_contains_expected_keys(self) -> None:
@@ -181,6 +190,85 @@ class PathAndEnvTests(unittest.TestCase):
         cmd = pythonlib_install_check_cmd("/opt/python-3.14.3/bin/python3.14")
         self.assertEqual(cmd[:2], ["/opt/python-3.14.3/bin/python3.14", "-c"])
         self.assertIn("import cinderx, _cinderx", cmd[2])
+
+    def test_pythonlib_pip_install_cmd(self) -> None:
+        self.assertEqual(
+            pythonlib_pip_install_cmd("/opt/python-3.14.3/bin/python3.14"),
+            [
+                "/opt/python-3.14.3/bin/python3.14",
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                "--no-deps",
+                ".",
+            ],
+        )
+
+    def test_pythonlib_install_build_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scratch = root / "scratch-pythonlib-cov"
+            scratch.mkdir()
+            target = scratch / "temp.test-cpython-314"
+            target.mkdir()
+            self.assertEqual(pythonlib_install_build_dir(root, coverage=True), target)
+
+    def test_pythonlib_install_build_base(self) -> None:
+        root = Path("/tmp/repo")
+        self.assertEqual(
+            pythonlib_install_build_base(root, coverage=True),
+            root / "scratch-pythonlib-cov",
+        )
+        self.assertEqual(
+            pythonlib_install_build_base(root, coverage=False),
+            root / "scratch",
+        )
+
+    def test_pythonlib_install_prefix(self) -> None:
+        output_root = Path("/tmp/out")
+        self.assertEqual(
+            pythonlib_install_prefix(output_root),
+            output_root / "pythonlib-install-prefix",
+        )
+
+    def test_pythonlib_install_site_packages(self) -> None:
+        prefix = Path("/tmp/prefix")
+        self.assertEqual(
+            pythonlib_install_site_packages(prefix),
+            prefix / "lib" / "python3.14" / "site-packages",
+        )
+
+    def test_pythonlib_install_env_coverage(self) -> None:
+        env = pythonlib_install_env(Path("/opt/openEuler/gcc-toolset-14/root"), coverage=True)
+        self.assertEqual(env["CFLAGS"], "--coverage")
+        self.assertEqual(env["CXXFLAGS"], "--coverage")
+        self.assertEqual(env["LDFLAGS"], "--coverage")
+        self.assertTrue(env["CINDERX_BUILD_BASE"].endswith("scratch-pythonlib-cov"))
+        self.assertIn("ENABLE_LIGHTWEIGHT_FRAMES", env)
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+        self.assertIn("PYTHONPATH", env)
+
+    def test_pythonlib_install_env_with_prefix(self) -> None:
+        prefix = Path("/tmp/prefix")
+        env = pythonlib_install_env(
+            Path("/opt/openEuler/gcc-toolset-14/root"),
+            coverage=False,
+            prefix=prefix,
+        )
+        self.assertTrue(env["PYTHONPATH"].startswith(str(prefix / "lib" / "python3.14" / "site-packages")))
+
+    def test_pythonlib_pip_install_env_coverage(self) -> None:
+        env = pythonlib_pip_install_env(
+            Path("/opt/openEuler/gcc-toolset-14/root"), coverage=True
+        )
+        self.assertEqual(env["CFLAGS"], "--coverage")
+        self.assertEqual(env["CXXFLAGS"], "--coverage")
+        self.assertEqual(env["LDFLAGS"], "--coverage")
+        self.assertTrue(env["CINDERX_BUILD_BASE"].endswith("scratch-pythonlib-cov"))
+        self.assertIn("ENABLE_LIGHTWEIGHT_FRAMES", env)
+        self.assertNotIn("PYTHONNOUSERSITE", env)
+        self.assertNotIn("PYTHONPATH", env)
 
     def test_pythonlib_module_env_for_jit_frame(self) -> None:
         self.assertEqual(
