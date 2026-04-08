@@ -12,6 +12,7 @@ from run_test_suites import (  # noqa: E402
     build_runtime_gtest_filter,
     build_gcc14_env,
     classify_pythonlib_result,
+    pythonlib_module_needs_native_build,
     classify_runtime_result,
     compute_cmake_feature_options,
     default_gcov_inputs,
@@ -174,6 +175,10 @@ class PathAndEnvTests(unittest.TestCase):
         self.assertIn(options["ENABLE_INTERPRETER_LOOP"], {"ON", "OFF"})
         self.assertIn(options["ENABLE_LIGHTWEIGHT_FRAMES"], {"ON", "OFF"})
         self.assertIn(options["ENABLE_PEP523_HOOK"], {"ON", "OFF"})
+
+    def test_pythonlib_module_needs_native_build(self) -> None:
+        self.assertTrue(pythonlib_module_needs_native_build("test_cinderx.test_jit_disable"))
+        self.assertFalse(pythonlib_module_needs_native_build("test.test_call"))
 
 
 class BannerAndSummaryTests(unittest.TestCase):

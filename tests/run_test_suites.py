@@ -400,6 +400,10 @@ def build_gcc14_env(gcc_root: Path, *, native_build_dir: Path | None = None) -> 
     return env
 
 
+def pythonlib_module_needs_native_build(module: str) -> bool:
+    return module.startswith("test_cinderx.")
+
+
 def extract_pythonlib_note(output: str) -> str:
     for line in output.splitlines():
         stripped = line.strip()
@@ -474,10 +478,7 @@ def run_pythonlib(
     logs_dir = ensure_dir(python_dir / "logs")
     build_dir = pick_pythonlib_build_dir(args)
 
-    if args.coverage:
-        env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
-    else:
-        env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
+    env = build_gcc14_env(args.gcc_root)
 
     tests = list_pythonlib_tests(args, env)
 
@@ -522,8 +523,11 @@ def run_pythonlib(
         safe_name = sanitize_name(module)
         log_path = logs_dir / f"{safe_name}.log"
         cmd = [args.python_exe, str(TESTSCRIPTS_RUNNER), "test", "-t", module]
+        module_env = env
+        if pythonlib_module_needs_native_build(module):
+            module_env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
 
-        proc = run_command(cmd, cwd=REPO_ROOT, env=env)
+        proc = run_command(cmd, cwd=REPO_ROOT, env=module_env)
         write_text(log_path, proc.stdout + proc.stderr)
         status, note = classify_pythonlib_result(proc)
         results.append(
