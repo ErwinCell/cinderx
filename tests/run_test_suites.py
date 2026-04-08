@@ -400,8 +400,12 @@ def build_gcc14_env(gcc_root: Path, *, native_build_dir: Path | None = None) -> 
     return env
 
 
-def pythonlib_module_needs_native_build(module: str) -> bool:
-    return module.startswith("test_cinderx.")
+def pythonlib_install_check_cmd(python_exe: str) -> list[str]:
+    return [
+        python_exe,
+        "-c",
+        "import cinderx, _cinderx; print(_cinderx.__file__)",
+    ]
 
 
 def extract_pythonlib_note(output: str) -> str:
@@ -476,9 +480,29 @@ def run_pythonlib(
 ) -> tuple[int, list[str], SuiteRunSummary]:
     python_dir = ensure_dir(output_root / "pythonlib")
     logs_dir = ensure_dir(python_dir / "logs")
-    build_dir = pick_pythonlib_build_dir(args)
-
     env = build_gcc14_env(args.gcc_root)
+
+    install_check_log = python_dir / "install-check.log"
+    install_check = run_command(
+        pythonlib_install_check_cmd(args.python_exe),
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    install_hint = (
+        "pythonlib requires an installed cinderx runtime. "
+        "Run `python -m pip install .` first.\n"
+    )
+    write_text(install_check_log, install_check.stdout + install_check.stderr + install_hint)
+    if install_check.returncode != 0:
+        print(f"[pythonlib] install check failed: {install_hint.strip()}")
+        summary = SuiteRunSummary(
+            name="pythonlib",
+            total=0,
+            counts={"INSTALL_REQUIRED": 1},
+            output_dir=str(python_dir),
+            artifacts=[str(install_check_log)],
+        )
+        return 1, [], summary
 
     tests = list_pythonlib_tests(args, env)
 
@@ -494,40 +518,12 @@ def run_pythonlib(
         )
         return 0, tests, summary
 
-    build_rc = maybe_build_native(
-        output_dir=python_dir,
-        env=env,
-        build_dir=build_dir,
-        build_runtime_tests=False,
-        targets=["_cinderx"],
-        coverage=args.coverage,
-        skip_build=args.no_build,
-    )
-    if build_rc != 0:
-        summary = SuiteRunSummary(
-            name="pythonlib",
-            total=len(tests),
-            counts={"BUILD_FAILED": 1},
-            output_dir=str(python_dir),
-            artifacts=[
-                str(python_dir / "configure.log"),
-                str(python_dir / "build.log"),
-            ],
-        )
-        return build_rc, tests, summary
-    if args.coverage:
-        clear_gcda_files(build_dir)
-
     results: list[CaseResult] = []
     for module in tests:
         safe_name = sanitize_name(module)
         log_path = logs_dir / f"{safe_name}.log"
         cmd = [args.python_exe, str(TESTSCRIPTS_RUNNER), "test", "-t", module]
-        module_env = env
-        if pythonlib_module_needs_native_build(module):
-            module_env = build_gcc14_env(args.gcc_root, native_build_dir=build_dir)
-
-        proc = run_command(cmd, cwd=REPO_ROOT, env=module_env)
+        proc = run_command(cmd, cwd=REPO_ROOT, env=env)
         write_text(log_path, proc.stdout + proc.stderr)
         status, note = classify_pythonlib_result(proc)
         results.append(
@@ -549,15 +545,6 @@ def run_pythonlib(
         str(python_dir / "summary.md"),
         str(python_dir / "tests.json"),
     ]
-    if args.coverage:
-        collect_cpp_coverage(python_dir, build_dir, env)
-        artifacts.extend(
-            [
-                str(python_dir / "gcda-files.txt"),
-                str(python_dir / "gcov-summary.txt"),
-                str(python_dir / "index.md"),
-            ]
-        )
 
     rc = 0 if all(result.status in {"PASSED", "SKIPPED", "NO_TESTS"} for result in results) else 1
     summary = SuiteRunSummary(

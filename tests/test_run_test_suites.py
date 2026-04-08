@@ -12,7 +12,6 @@ from run_test_suites import (  # noqa: E402
     build_runtime_gtest_filter,
     build_gcc14_env,
     classify_pythonlib_result,
-    pythonlib_module_needs_native_build,
     classify_runtime_result,
     compute_cmake_feature_options,
     default_gcov_inputs,
@@ -20,6 +19,7 @@ from run_test_suites import (  # noqa: E402
     format_finish_summary,
     format_start_banner,
     is_product_source,
+    pythonlib_install_check_cmd,
     pick_pythonlib_build_dir,
     pick_product_build_dir,
     product_source_roots,
@@ -176,10 +176,10 @@ class PathAndEnvTests(unittest.TestCase):
         self.assertIn(options["ENABLE_LIGHTWEIGHT_FRAMES"], {"ON", "OFF"})
         self.assertIn(options["ENABLE_PEP523_HOOK"], {"ON", "OFF"})
 
-    def test_pythonlib_module_needs_native_build(self) -> None:
-        self.assertTrue(pythonlib_module_needs_native_build("test_cinderx.test_jit_disable"))
-        self.assertFalse(pythonlib_module_needs_native_build("test.test_call"))
-
+    def test_pythonlib_install_check_cmd(self) -> None:
+        cmd = pythonlib_install_check_cmd("/opt/python-3.14.3/bin/python3.14")
+        self.assertEqual(cmd[:2], ["/opt/python-3.14.3/bin/python3.14", "-c"])
+        self.assertIn("import cinderx, _cinderx", cmd[2])
 
 class BannerAndSummaryTests(unittest.TestCase):
     def test_format_start_banner_contains_effective_values(self) -> None:
