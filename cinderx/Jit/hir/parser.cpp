@@ -364,6 +364,21 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<LoadMethodCached>(dst, receiver, idx);
       break;
     }
+    case Opcode::kLoadMethodCacheEntryType: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      expect(">");
+      NEW_INSTR(LoadMethodCacheEntryType, dst, cache_id);
+      break;
+    }
+    case Opcode::kLoadMethodCacheEntryValue: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      expect(">");
+      auto receiver = ParseRegister();
+      NEW_INSTR(LoadMethodCacheEntryValue, dst, cache_id, receiver);
+      break;
+    }
     case Opcode::kLoadTupleItem: {
       expect("<");
       int idx = GetNextNameIdx();
@@ -563,6 +578,15 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       NEW_INSTR(IntBinaryOp, dst, op, left, right);
       break;
     }
+    case Opcode::kCheckedIntBinaryOp: {
+      expect("<");
+      BinaryOpKind op = ParseBinaryOpName(GetNextToken());
+      expect(">");
+      auto left = ParseRegister();
+      auto right = ParseRegister();
+      NEW_INSTR(CheckedIntBinaryOp, dst, op, left, right, FrameState{});
+      break;
+    }
     case Opcode::kFloatBinaryOp: {
       expect("<");
       BinaryOpKind op = ParseBinaryOpName(GetNextToken());
@@ -570,6 +594,16 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       auto left = ParseRegister();
       auto right = ParseRegister();
       instruction = newInstr<FloatBinaryOp>(dst, op, left, right);
+      break;
+    }
+    case Opcode::kDoubleSqrt: {
+      auto operand = ParseRegister();
+      NEW_INSTR(DoubleSqrt, dst, operand);
+      break;
+    }
+    case Opcode::kDoubleAbs: {
+      auto operand = ParseRegister();
+      NEW_INSTR(DoubleAbs, dst, operand);
       break;
     }
     case Opcode::kCompare: {
@@ -599,6 +633,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       NEW_INSTR(LongCompare, dst, op, left, right);
       break;
     }
+    case Opcode::kLongUnboxCompact: {
+      auto operand = ParseRegister();
+      NEW_INSTR(LongUnboxCompact, dst, operand, FrameState{});
+      break;
+    }
     case Opcode::kUnicodeCompare: {
       expect("<");
       CompareOp op = ParseCompareOpName(GetNextToken());
@@ -624,6 +663,13 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       auto left = ParseRegister();
       auto right = ParseRegister();
       NEW_INSTR(UnicodeSubscr, dst, left, right, FrameState{});
+      break;
+    }
+    case Opcode::kListSlice: {
+      auto list = ParseRegister();
+      auto start = ParseRegister();
+      auto stop = ParseRegister();
+      NEW_INSTR(ListSlice, dst, list, start, stop, FrameState{});
       break;
     }
     case Opcode::kIntConvert: {
@@ -727,6 +773,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<GetIter>(dst, iterable);
       break;
     }
+    case Opcode::kGetLengthInt64: {
+      auto container = ParseRegister();
+      NEW_INSTR(GetLengthInt64, dst, container, FrameState{});
+      break;
+    }
     case Opcode::kGetSecondOutput: {
       expect("<");
       Type ty = parseType(GetNextToken());
@@ -759,6 +810,16 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
           newInstr<FillTypeAttrCache>(dst, receiver, name_idx, cache_id);
       break;
     }
+    case Opcode::kFillMethodCache: {
+      expect("<");
+      int cache_id = GetNextInteger();
+      int name_idx = GetNextInteger();
+      expect(">");
+      auto receiver = ParseRegister();
+      instruction =
+          newInstr<FillMethodCache>(dst, receiver, name_idx, cache_id);
+      break;
+    }
     case Opcode::kLoadArrayItem: {
       auto ob_item = ParseRegister();
       auto idx = ParseRegister();
@@ -788,6 +849,11 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       instruction = newInstr<Guard>(operand);
       break;
     }
+    case Opcode::kGuardNonNegativeDouble: {
+      auto operand = ParseRegister();
+      instruction = newInstr<GuardNonNegativeDouble>(operand);
+      break;
+    }
     case Opcode::kGuardType: {
       expect("<");
       Type ty = parseType(GetNextToken());
@@ -807,6 +873,14 @@ HIRParser::parseInstr(std::string_view opcode, Register* dst, int bb_index) {
       expect(">");
       auto operand = ParseRegister();
       NEW_INSTR(GuardIs, dst, Py_None, operand);
+      break;
+    }
+    case Opcode::kGuardModuleAttrValue: {
+      expect("<");
+      int idx = GetNextNameIdx();
+      expect(">");
+      auto receiver = ParseRegister();
+      instruction = newInstr<GuardModuleAttrValue>(Py_None, receiver, idx);
       break;
     }
     case Opcode::kIsTruthy: {

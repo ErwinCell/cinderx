@@ -12,9 +12,14 @@
 #include "cinderx/Jit/hir/copy_propagation.h"
 #include "cinderx/Jit/hir/dead_code_elimination.h"
 #include "cinderx/Jit/hir/dynamic_comparison_elimination.h"
+#include "cinderx/Jit/hir/float_compare_elimination.h"
 #include "cinderx/Jit/hir/guard_removal.h"
+#include "cinderx/Jit/hir/guarded_load_elimination.h"
 #include "cinderx/Jit/hir/inliner.h"
 #include "cinderx/Jit/hir/insert_update_prev_instr.h"
+#include "cinderx/Jit/hir/list_slice_cleanup.h"
+#include "cinderx/Jit/hir/long_loop_unboxing.h"
+#include "cinderx/Jit/hir/make_function_const_fold.h"
 #include "cinderx/Jit/hir/phi_elimination.h"
 #include "cinderx/Jit/hir/refcount_insertion.h"
 #include "cinderx/Jit/hir/simplify.h"
@@ -63,8 +68,13 @@ class TestPassRegistry {
     addPass(jit::hir::CopyPropagation::Factory);
     addPass(jit::hir::CleanCFG::Factory);
     addPass(jit::hir::DynamicComparisonElimination::Factory);
+    addPass(jit::hir::FloatCompareElimination::Factory);
     addPass(jit::hir::PhiElimination::Factory);
+    addPass(jit::hir::GuardedLoadElimination::Factory);
     addPass(jit::hir::InlineFunctionCalls::Factory);
+    addPass(jit::hir::ListSliceCleanup::Factory);
+    addPass(jit::hir::LongLoopUnboxing::Factory);
+    addPass(jit::hir::MakeFunctionConstFold::Factory);
     addPass(jit::hir::Simplify::Factory);
     addPass(jit::hir::DeadCodeElimination::Factory);
     addPass(jit::hir::GuardTypeRemoval::Factory);
@@ -220,11 +230,15 @@ int main(int argc, char* argv[]) {
 
   register_test("clean_cfg_test.txt");
   register_test("dynamic_comparison_elimination_test.txt");
+  register_test("float_compare_elimination_test.txt");
   register_test("hir_builder_static_test.txt", RuntimeTest::kStaticCompiler);
   register_test("guard_type_removal_test.txt");
+  register_test("guarded_load_elimination_test.txt");
   register_test("inliner_test.txt");
   register_test("inliner_elimination_test.txt");
   register_test("inliner_static_test.txt", RuntimeTest::kStaticCompiler);
+  register_test("list_slice_cleanup_test.txt");
+  register_test("long_loop_unboxing_test.txt");
   register_test(
       "inliner_elimination_static_test.txt", RuntimeTest::kStaticCompiler);
   register_test("phi_elimination_test.txt");
